@@ -1,7 +1,9 @@
+"""Common utilities for ALA CIFAR-100 experiments."""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, models, transforms
 
 
@@ -10,6 +12,7 @@ def set_seed(seed: int = 42) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def get_dataloaders(
@@ -19,6 +22,8 @@ def get_dataloaders(
 
     Train set (50k) is split into 40k train / 10k val.
     Train has augmentation; val and test have Normalize only.
+    Two separate datasets are created with the same seed split so that
+    train indices get augmentation and val indices do not.
     """
     mean = [0.5071, 0.4867, 0.4408]
     std = [0.2675, 0.2565, 0.2761]
@@ -34,7 +39,7 @@ def get_dataloaders(
         transforms.Normalize(mean=mean, std=std),
     ])
 
-    # Augmented full dataset for train split
+    # Augmented full dataset → take train split
     train_full = datasets.CIFAR100(
         root="./data", train=True, download=True, transform=train_transform,
     )
@@ -43,7 +48,7 @@ def get_dataloaders(
         generator=torch.Generator().manual_seed(0),
     )
 
-    # Non-augmented full dataset for val split
+    # Non-augmented full dataset → take val split
     val_full = datasets.CIFAR100(
         root="./data", train=True, download=True, transform=test_transform,
     )

@@ -1,3 +1,5 @@
+"""Part 1: Baseline ResNet-18 training on CIFAR-100 with standard cross-entropy."""
+
 import os
 
 import torch
@@ -9,7 +11,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from utils import set_seed, get_dataloaders, get_model, evaluate, get_optimizer_and_scheduler
+from utils import (
+    set_seed,
+    get_dataloaders,
+    get_model,
+    evaluate,
+    get_optimizer_and_scheduler,
+)
 
 
 def train_one_epoch(
@@ -48,7 +56,7 @@ def main() -> None:
     train_losses: list[float] = []
     test_accs: list[float] = []
 
-    for epoch in tqdm(range(1, 201), desc="Training"):
+    for epoch in tqdm(range(1, 201), desc="Baseline"):
         loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
         acc = evaluate(model, test_loader, device)
         scheduler.step()
