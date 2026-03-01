@@ -80,11 +80,11 @@ class ReplayMemory:
 
 
 def compute_reward(M_old: float, M_new: float) -> float:
-    """Compute reward (Eq.5): r_t = sign(M_old - M_new).
-
-    M is classification error, so a decrease yields +1.
-    """
-    if M_old > M_new:
+    """Compute reward (Eq.5): r_t = sign(M_old - M_new)."""
+    diff = M_old - M_new
+    if diff > 0:
         return 1.0
-    else:
+    elif diff < 0:
         return -1.0
+    else:
+        return 0.0
