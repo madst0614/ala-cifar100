@@ -25,8 +25,6 @@ class ALAPolicy(nn.Module):
             nn.ReLU(),
             nn.Linear(32, 3),
         )
-        with torch.no_grad():
-            self.net[-1].bias.copy_(torch.tensor([0.0, 2.0, 0.0]))
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         return self.net(state)

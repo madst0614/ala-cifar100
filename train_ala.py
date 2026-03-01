@@ -170,7 +170,7 @@ def main() -> None:
     num_classes = 100
     ce_criterion = nn.CrossEntropyLoss()
     adaptive_loss = AdaptiveLoss(num_classes).to(device)
-    warmup_epochs = 0
+    warmup_epochs = 50
 
     # RL controller
     state_dim = 24
@@ -186,7 +186,7 @@ def main() -> None:
     pair_i, pair_j = get_pair_indices_tensor(num_classes, device)
 
     steps_per_epoch = len(train_loader)
-    total_steps = 30 * steps_per_epoch
+    total_steps = 200 * steps_per_epoch
 
     # -----------------------------------------------------------------------
     # GPU preload val/test sets (~240 MB total on A100 40GB)
@@ -352,49 +352,7 @@ def main() -> None:
             delta_phi = actions_to_delta_phi(
                 actions, pair_i, pair_j, num_classes, beta, device,
             )
-
-            # --- Debug logging (before update_phi) ---
-            # Delta phi stats
-            log_and_print(
-                f"  Delta phi: nonzero={delta_phi.nonzero().shape[0]}, "
-                f"mean_abs={delta_phi.abs().mean():.6f}",
-                log_file,
-            )
-            # Action distribution
-            n_minus = (actions == 0).sum().item()
-            n_zero = (actions == 1).sum().item()
-            n_plus = (actions == 2).sum().item()
-            total_actions = actions.shape[0]
-            log_and_print(
-                f"  Actions: -beta={n_minus/total_actions*100:.1f}%, "
-                f"0={n_zero/total_actions*100:.1f}%, "
-                f"+beta={n_plus/total_actions*100:.1f}%",
-                log_file,
-            )
-
             adaptive_loss.update_phi(delta_phi)
-
-            # Phi off-diagonal stats (after update)
-            phi_offdiag = adaptive_loss.phi.data[
-                ~torch.eye(num_classes, dtype=torch.bool, device=device)
-            ]
-            log_and_print(
-                f"  Phi off-diag: mean={phi_offdiag.mean():.4f}, "
-                f"std={phi_offdiag.std():.4f}, "
-                f"min={phi_offdiag.min():.4f}, max={phi_offdiag.max():.4f}",
-                log_file,
-            )
-            # Cumulative metric
-            log_and_print(f"  M_new={M_new:.2f}", log_file)
-            # Inner product stats
-            if hasattr(adaptive_loss, '_last_inner'):
-                inner_dbg = adaptive_loss._last_inner
-                log_and_print(
-                    f"  Inner: mean={inner_dbg.mean():.2f}, "
-                    f"min={inner_dbg.min():.2f}, max={inner_dbg.max():.2f}",
-                    log_file,
-                )
-            # --- End debug logging ---
 
             M_old = M_new
             prev_states = all_states
