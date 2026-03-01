@@ -58,8 +58,12 @@ def update_policy(
     memory: ReplayMemory,
     batch_size: int,
     baseline_ema: float,
+    device: torch.device,
 ) -> float:
     """REINFORCE policy gradient update.
+
+    Re-computes log_probs via a fresh forward pass so that gradients
+    flow back through the policy network.
 
     Args:
         policy: the policy network.
@@ -67,19 +71,27 @@ def update_policy(
         memory: replay memory.
         batch_size: number of transitions to sample.
         baseline_ema: exponential moving average baseline for variance reduction.
+        device: torch device.
 
     Returns:
         Updated baseline_ema.
     """
     samples = memory.sample(batch_size)
 
-    total_loss = torch.tensor(0.0)
+    total_loss = torch.tensor(0.0, device=device)
     total_reward = 0.0
 
-    for states, actions, log_probs, reward in samples:
+    for states, actions, _old_log_probs, reward in samples:
+        states = states.to(device)
+        actions = actions.to(device)
+
+        # Re-forward through policy to get fresh log_probs with grad
+        logits = policy(states)
+        dist = torch.distributions.Categorical(logits=logits)
+        new_log_probs = dist.log_prob(actions)
+
         advantage = reward - baseline_ema
-        # log_probs: (num_pairs,) — use stored log_probs directly
-        sample_loss = -(log_probs * advantage).mean()
+        sample_loss = -(new_log_probs * advantage).mean()
         total_loss = total_loss + sample_loss
         total_reward += reward
 
@@ -191,7 +203,7 @@ def main() -> None:
                 if len(memory) >= policy_batch_size:
                     baseline_ema = update_policy(
                         policy, policy_optimizer, memory,
-                        policy_batch_size, baseline_ema,
+                        policy_batch_size, baseline_ema, device,
                     )
 
                 # 4. Confusion matrix → state

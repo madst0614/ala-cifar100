@@ -56,6 +56,9 @@ def main() -> None:
     train_losses: list[float] = []
     test_accs: list[float] = []
 
+    os.makedirs("results", exist_ok=True)
+    log_file = open("results/baseline_training_log.txt", "w")
+
     for epoch in tqdm(range(1, 201), desc="Baseline"):
         loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
         acc = evaluate(model, test_loader, device)
@@ -64,9 +67,10 @@ def main() -> None:
         train_losses.append(loss)
         test_accs.append(acc)
 
-        tqdm.write(
-            f"Epoch {epoch:3d} | Train Loss: {loss:.4f} | Test Acc: {acc:.2f}%"
-        )
+        msg = f"Epoch {epoch:3d} | Train Loss: {loss:.4f} | Test Acc: {acc:.2f}%"
+        tqdm.write(msg)
+        log_file.write(msg + "\n")
+        log_file.flush()
 
     # Save results
     os.makedirs("results/curves", exist_ok=True)
@@ -87,7 +91,10 @@ def main() -> None:
     plt.savefig("results/curves/baseline_test_acc.png", dpi=150)
     plt.close()
 
-    print(f"\nFinal Test Accuracy: {test_accs[-1]:.2f}%")
+    final_msg = f"\nFinal Test Accuracy: {test_accs[-1]:.2f}%"
+    print(final_msg)
+    log_file.write(final_msg + "\n")
+    log_file.close()
 
 
 if __name__ == "__main__":
