@@ -170,7 +170,7 @@ def main() -> None:
     num_classes = 100
     ce_criterion = nn.CrossEntropyLoss()
     adaptive_loss = AdaptiveLoss(num_classes).to(device)
-    warmup_epochs = 50
+    warmup_epochs = 0
 
     # RL controller
     state_dim = 24
@@ -244,23 +244,22 @@ def main() -> None:
                 val_accs.append(val_acc)
                 test_accs.append(test_acc)
 
-                if current_epoch <= warmup_epochs:
+                if warmup_epochs > 0 and current_epoch <= warmup_epochs:
                     log_and_print(
                         f"Epoch {current_epoch:3d} | CE Warmup | "
                         f"Train Loss: {avg_loss:.4f} | "
                         f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
                         log_file,
                     )
+                    if current_epoch == warmup_epochs:
+                        log_and_print(
+                            "CE warmup complete. Switching to adaptive loss + RL.",
+                            log_file,
+                        )
                 else:
                     log_and_print(
                         f"Epoch {current_epoch:3d} | Train Loss: {avg_loss:.4f} | "
                         f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
-                        log_file,
-                    )
-
-                if current_epoch == warmup_epochs:
-                    log_and_print(
-                        "CE warmup complete. Switching to adaptive loss + RL.",
                         log_file,
                     )
 

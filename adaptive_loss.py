@@ -39,7 +39,7 @@ class AdaptiveLoss(nn.Module):
         y = F.one_hot(targets, self.num_classes).float()      # (B, C)
         weighted = y @ self.phi                               # (B, C)
         inner = (weighted * log_probs).sum(dim=1)             # (B,)
-        sig = torch.sigmoid(inner)                            # (B,)
+        sig = torch.sigmoid(inner / self.num_classes)           # (B,)
         return (-sig).mean()
 
     def update_phi(self, delta_phi: torch.Tensor) -> None:
