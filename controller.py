@@ -22,10 +22,6 @@ class ALAPolicy(nn.Module):
             nn.ReLU(),
             nn.Linear(32, 3),
         )
-        # Bias last layer toward "no change" (index 1) at initialization
-        # Actions: 0=-beta, 1=0 (no change), 2=+beta
-        with torch.no_grad():
-            self.net[-1].bias.copy_(torch.tensor([-2.0, 2.0, -2.0]))
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """Compute action logits.
@@ -100,23 +96,28 @@ class ReplayMemory:
         return len(self.buffer)
 
 
-def compute_discounted_metric(metrics: list[float], gamma: float = 0.9) -> float:
-    """Compute discounted metric (Eq.4).
+def compute_discounted_metric(
+    eval_points: list[tuple[int, float]], K: int, gamma: float = 0.9,
+) -> float:
+    """Compute discounted cumulative metric (Eq.4).
 
-    M_{t+1} = sum_{j=1}^{K} gamma^{K-j} * M_j
+    M_{t+1} = Σ_j γ^{K-j} * M_j, normalized by total weight.
 
     Args:
-        metrics: K validation error values.
+        eval_points: list of (step_within_window, val_error) tuples.
+        K: total steps in the window.
         gamma: discount factor.
 
     Returns:
-        Discounted sum.
+        Weighted discounted metric.
     """
-    K = len(metrics)
-    result = 0.0
-    for j in range(K):
-        result += (gamma ** (K - 1 - j)) * metrics[j]
-    return result
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for j, err in eval_points:
+        w = gamma ** (K - j)
+        weighted_sum += w * err
+        total_weight += w
+    return weighted_sum / total_weight
 
 
 def compute_reward(M_old: float, M_new: float) -> float:

@@ -1,4 +1,4 @@
-"""Part 4c: Full ALA training loop with RL-controlled adaptive loss."""
+"""Part 4c: Full ALA training loop following Algorithm 1 of the paper."""
 
 import os
 
@@ -19,7 +19,12 @@ from utils import (
 )
 from adaptive_loss import AdaptiveLoss
 from state import compute_confusion_matrix, construct_states, get_pair_indices_tensor
-from controller import ALAPolicy, ReplayMemory, compute_reward
+from controller import (
+    ALAPolicy,
+    ReplayMemory,
+    compute_discounted_metric,
+    compute_reward,
+)
 
 
 def actions_to_delta_phi(
@@ -117,7 +122,7 @@ def log_and_print(msg: str, log_file) -> None:
 
 
 def main() -> None:
-    """Run full ALA training: ResNet-18 + adaptive loss + RL controller."""
+    """Run full ALA training following Algorithm 1 of the paper."""
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -126,10 +131,9 @@ def main() -> None:
     model = get_model(device)
     optimizer, scheduler = get_optimizer_and_scheduler(model)
 
-    # Adaptive loss + CE for warmup
+    # Adaptive loss
     num_classes = 100
     adaptive_loss = AdaptiveLoss(num_classes).to(device)
-    ce_criterion = nn.CrossEntropyLoss()
 
     # RL controller
     state_dim = 24
@@ -140,14 +144,13 @@ def main() -> None:
     # Hyperparameters
     K = 200
     beta = 0.1
+    gamma = 0.9
+    N_eval = 20
+    eval_interval = K // N_eval  # 10 steps
     policy_batch_size = 8
-    warmup_epochs = 30  # CE warmup for 30 epochs, then ALA + RL
-    num_total_pairs = num_classes * (num_classes - 1) // 2  # 4950
-    num_sample_pairs = 200  # Sample 200 pairs per RL step
     pair_i, pair_j = get_pair_indices_tensor(num_classes, device)
 
     total_iterations = 200 * len(train_loader)
-    rl_activated = False
 
     # State tracking
     confusion_history: list[torch.Tensor] = []
@@ -156,6 +159,10 @@ def main() -> None:
     prev_actions: torch.Tensor | None = None
     prev_log_probs: torch.Tensor | None = None
     baseline_ema = 0.0
+
+    # Cumulative reward tracking within K-step window
+    eval_points: list[tuple[int, float]] = []
+    steps_in_window = 0
 
     # Logging
     os.makedirs("results/curves", exist_ok=True)
@@ -178,43 +185,37 @@ def main() -> None:
 
             optimizer.zero_grad()
             logits = model(inputs)
-
-            # Warmup: CE loss; after warmup: adaptive loss
-            if epoch <= warmup_epochs:
-                loss = ce_criterion(logits, targets)
-            else:
-                loss = adaptive_loss(logits, targets)
-
+            loss = adaptive_loss(logits, targets)
             loss.backward()
             optimizer.step()
 
             running_loss += loss.item() * inputs.size(0)
             total += inputs.size(0)
             global_step += 1
+            steps_in_window += 1
 
-            # RL controller update every K steps (after warmup only)
-            if epoch > warmup_epochs and global_step % K == 0:
-                if not rl_activated:
-                    log_and_print(
-                        f"  [Step {global_step}] RL controller activated",
-                        log_file,
-                    )
-                    rl_activated = True
+            # Collect val error at N_eval evenly spaced points within K-window
+            if steps_in_window % eval_interval == 0 and steps_in_window <= K:
+                model.eval()
+                val_acc_mid = evaluate(model, val_loader, device)
+                val_error_mid = 100.0 - val_acc_mid
+                eval_points.append((steps_in_window, val_error_mid))
+                model.train()
 
+            # RL controller update at end of K-step window
+            if global_step % K == 0:
                 progress = global_step / total_iterations
 
-                # 1. Validation error
-                val_acc = evaluate(model, val_loader, device)
-                val_error = 100.0 - val_acc
-                M_new = val_error
+                # 1. Cumulative metric (Eq.4)
+                M_new = compute_discounted_metric(eval_points, K, gamma)
 
-                # 2. Reward computation (from second update onward)
+                # 2. Reward computation (from second window onward)
                 if M_old is not None and prev_states is not None:
                     reward = compute_reward(M_old, M_new)
                     memory.push(prev_states, prev_actions, prev_log_probs, reward)
                     log_and_print(
                         f"  [Step {global_step}] Reward: {reward:+.1f} | "
-                        f"Val Error: {val_error:.2f}%",
+                        f"M: {M_new:.2f}",
                         log_file,
                     )
 
@@ -231,37 +232,30 @@ def main() -> None:
                 if len(confusion_history) > 10:
                     confusion_history.pop(0)
 
-                all_states = construct_states(
+                states = construct_states(
                     confusion_history, adaptive_loss.phi.data, progress,
                     num_classes, pair_i, pair_j,
                 )
 
-                # 5. Sample 200 pairs out of 4950
-                sample_idx = torch.randperm(
-                    num_total_pairs, device=device,
-                )[:num_sample_pairs]
-                sampled_states = all_states[sample_idx]
-
-                # 6. Action sampling (sampled pairs only)
+                # 5. Action sampling (all pairs)
                 with torch.no_grad():
-                    sampled_actions, sampled_log_probs = policy.select_action(
-                        sampled_states,
-                    )
+                    actions, action_log_probs = policy.select_action(states)
 
-                # 7. Phi update (sampled pairs only)
-                sampled_pair_i = pair_i[sample_idx]
-                sampled_pair_j = pair_j[sample_idx]
+                # 6. Phi update (all pairs)
                 delta_phi = actions_to_delta_phi(
-                    sampled_actions, sampled_pair_i, sampled_pair_j,
-                    num_classes, beta, device,
+                    actions, pair_i, pair_j, num_classes, beta, device,
                 )
                 adaptive_loss.update_phi(delta_phi)
 
-                # 8. Save state for next reward computation
+                # 7. Save state for next reward computation
                 M_old = M_new
-                prev_states = sampled_states
-                prev_actions = sampled_actions
-                prev_log_probs = sampled_log_probs
+                prev_states = states
+                prev_actions = actions
+                prev_log_probs = action_log_probs
+
+                # Reset window
+                eval_points = []
+                steps_in_window = 0
 
                 # Restore train mode
                 model.train()
@@ -276,23 +270,11 @@ def main() -> None:
         val_accs.append(val_acc)
         test_accs.append(test_acc)
 
-        if epoch <= warmup_epochs:
-            log_and_print(
-                f"Epoch {epoch:3d} | CE Warmup | Train Loss: {epoch_loss:.4f} | "
-                f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
-                log_file,
-            )
-            if epoch == warmup_epochs:
-                log_and_print(
-                    "CE warmup complete. Switching to adaptive loss + RL controller.",
-                    log_file,
-                )
-        else:
-            log_and_print(
-                f"Epoch {epoch:3d} | Train Loss: {epoch_loss:.4f} | "
-                f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
-                log_file,
-            )
+        log_and_print(
+            f"Epoch {epoch:3d} | Train Loss: {epoch_loss:.4f} | "
+            f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
+            log_file,
+        )
 
         # Save phi at checkpoints
         if epoch in (50, 100, 150, 200):

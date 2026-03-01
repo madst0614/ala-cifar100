@@ -26,7 +26,7 @@ class AdaptiveLoss(nn.Module):
         )
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Compute adaptive loss.
+        """Compute adaptive loss (Eq. 6).
 
         Args:
             logits: (B, C) raw model outputs before softmax.
@@ -35,14 +35,10 @@ class AdaptiveLoss(nn.Module):
         Returns:
             Scalar loss (batch mean).
         """
-        # log_softmax is numerically stable (avoids softmax → log roundtrip)
         log_probs = F.log_softmax(logits, dim=1)             # (B, C)
         y = F.one_hot(targets, self.num_classes).float()      # (B, C)
         weighted = y @ self.phi                               # (B, C)
         inner = (weighted * log_probs).sum(dim=1)             # (B,)
-        # Clamp to keep sigmoid in a gradient-friendly range
-        # sigmoid(-10) ≈ 4.5e-5, sigmoid(0) = 0.5
-        inner = inner.clamp(-10.0, 0.0)
         sig = torch.sigmoid(inner)                            # (B,)
         return (-sig).mean()
 
