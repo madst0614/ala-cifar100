@@ -170,7 +170,7 @@ def main() -> None:
     num_classes = 100
     ce_criterion = nn.CrossEntropyLoss()
     adaptive_loss = AdaptiveLoss(num_classes).to(device)
-    warmup_epochs = 50
+    warmup_epochs = 0
 
     # RL controller
     state_dim = 24
@@ -186,7 +186,7 @@ def main() -> None:
     pair_i, pair_j = get_pair_indices_tensor(num_classes, device)
 
     steps_per_epoch = len(train_loader)
-    total_steps = 70 * steps_per_epoch
+    total_steps = 30 * steps_per_epoch
 
     # -----------------------------------------------------------------------
     # GPU preload val/test sets (~240 MB total on A100 40GB)
@@ -357,7 +357,7 @@ def main() -> None:
             # Delta phi stats
             log_and_print(
                 f"  Delta phi: nonzero={delta_phi.nonzero().shape[0]}, "
-                f"mean_abs={delta_phi.abs().mean():.4f}",
+                f"mean_abs={delta_phi.abs().mean():.6f}",
                 log_file,
             )
             # Action distribution
