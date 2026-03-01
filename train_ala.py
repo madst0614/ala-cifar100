@@ -140,6 +140,7 @@ def main() -> None:
     K = 200
     beta = 0.1
     policy_batch_size = 8
+    warmup_epochs = 10  # First 10 epochs: Φ=I fixed, no RL
     pair_i, pair_j = get_pair_indices_tensor(num_classes, device)
 
     total_iterations = 200 * len(train_loader)
@@ -181,8 +182,8 @@ def main() -> None:
             total += inputs.size(0)
             global_step += 1
 
-            # RL controller update every K steps
-            if global_step % K == 0:
+            # RL controller update every K steps (skip during warmup)
+            if global_step % K == 0 and epoch > warmup_epochs:
                 progress = global_step / total_iterations
 
                 # 1. Validation error

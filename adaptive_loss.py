@@ -35,32 +35,36 @@ class AdaptiveLoss(nn.Module):
         Returns:
             Scalar loss (batch mean).
         """
-        # 1. softmax → probabilities
-        probs = F.softmax(logits, dim=1)                    # (B, C)
-        # 2. log probabilities with numerical stability
-        log_probs = torch.log(probs + 1e-8)                 # (B, C)
-        # 3. one-hot encoding
-        y = F.one_hot(targets, self.num_classes).float()     # (B, C)
-        # 4. weighted = y @ Φ  (selects the Φ row for each sample's class)
-        weighted = y @ self.phi                              # (B, C)
-        # 5. inner product: (weighted * log_probs).sum(dim=1)
-        inner = (weighted * log_probs).sum(dim=1)            # (B,)
-        # 6. sigmoid
-        sig = torch.sigmoid(inner)                           # (B,)
-        # 7. negative mean
+        # log_softmax is numerically stable (avoids softmax → log roundtrip)
+        log_probs = F.log_softmax(logits, dim=1)             # (B, C)
+        y = F.one_hot(targets, self.num_classes).float()      # (B, C)
+        weighted = y @ self.phi                               # (B, C)
+        inner = (weighted * log_probs).sum(dim=1)             # (B,)
+        sig = torch.sigmoid(inner)                            # (B,)
         return (-sig).mean()
 
     def update_phi(self, delta_phi: torch.Tensor) -> None:
-        """Apply an additive update to Φ, then enforce symmetry and clamp.
+        """Apply an additive update to Φ, then enforce constraints.
+
+        Diagonal elements are kept at 1.0 (RL only adjusts off-diagonal
+        class relationships). Off-diagonal values are clamped to [-1, 1]
+        and symmetry is enforced.
 
         Args:
             delta_phi: (C, C) tensor of updates to add to Φ.
         """
         self.phi.data += delta_phi
+        # Diagonal stays at 1 — RL controls off-diagonal only
+        self.phi.data.fill_diagonal_(1.0)
         # Enforce symmetry: Φ(i,j) = Φ(j,i)
         self.phi.data = (self.phi.data + self.phi.data.T) / 2
-        # Clamp to [-1, 1]
-        self.phi.data.clamp_(-1, 1)
+        # Restore diagonal after symmetry averaging
+        self.phi.data.fill_diagonal_(1.0)
+        # Clamp off-diagonal only
+        diag = torch.diag(self.phi.data.diag())
+        off_diag = self.phi.data - diag
+        off_diag = off_diag.clamp(-1, 1)
+        self.phi.data = diag + off_diag
 
     def reset_phi(self) -> None:
         """Reset Φ to the identity matrix."""
