@@ -38,10 +38,7 @@ class AdaptiveLoss(nn.Module):
         log_probs = F.log_softmax(logits, dim=1)             # (B, C)
         y = F.one_hot(targets, self.num_classes).float()      # (B, C)
         weighted = y @ self.phi                               # (B, C)
-        # off-diagonal 기여가 클래스 수에 비례해서 커지는 것을 방지
-        norm = weighted.abs().sum(dim=1, keepdim=True).clamp(min=1.0)
-        weighted_normalized = weighted / norm
-        inner = (weighted_normalized * log_probs).sum(dim=1)  # (B,)
+        inner = (weighted * log_probs).sum(dim=1)             # (B,)
         sig = torch.sigmoid(inner)                             # (B,)
         self._last_inner = inner.detach()
         return (-sig).mean()
