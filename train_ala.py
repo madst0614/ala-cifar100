@@ -1,9 +1,10 @@
 """Part 4c: Full ALA training loop following Algorithm 1 of the paper.
 
-Training is structured around K-step windows (K=200). Within each window,
-every SGD step is followed by a fast GPU-resident validation evaluation to
-compute the cumulative discounted metric (Eq.4). At window boundaries the
-RL controller computes reward (Eq.5), updates the policy, and adjusts Phi.
+Training is structured around K-step windows (K=200). The first 50 epochs
+use standard CE loss (warmup). After warmup, every SGD step within a K-window
+is followed by a fast GPU-resident validation evaluation to compute the
+cumulative discounted metric (Eq.4). At window boundaries the RL controller
+computes reward (Eq.5), updates the policy, and adjusts Phi.
 
 GPU memory optimization: val/test sets are pre-loaded onto GPU to eliminate
 CPU-GPU transfer overhead during the ~200 val evals per K-window.
@@ -165,9 +166,11 @@ def main() -> None:
     model = get_model(device)
     optimizer, scheduler = get_optimizer_and_scheduler(model)
 
-    # Adaptive loss — no CE warmup, adaptive from step 1
+    # Loss functions
     num_classes = 100
+    ce_criterion = nn.CrossEntropyLoss()
     adaptive_loss = AdaptiveLoss(num_classes).to(device)
+    warmup_epochs = 50
 
     # RL controller
     state_dim = 24
@@ -223,7 +226,7 @@ def main() -> None:
     pbar = tqdm(total=total_steps, desc="ALA Training", unit="step")
 
     while global_step < total_steps:
-        # === One K-step window (Eq.4) ===
+        # === One K-step window ===
         cumulative_metric = 0.0
 
         for j in range(1, K + 1):
@@ -241,11 +244,25 @@ def main() -> None:
                 val_accs.append(val_acc)
                 test_accs.append(test_acc)
 
-                log_and_print(
-                    f"Epoch {current_epoch:3d} | Train Loss: {avg_loss:.4f} | "
-                    f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
-                    log_file,
-                )
+                if current_epoch <= warmup_epochs:
+                    log_and_print(
+                        f"Epoch {current_epoch:3d} | CE Warmup | "
+                        f"Train Loss: {avg_loss:.4f} | "
+                        f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
+                        log_file,
+                    )
+                else:
+                    log_and_print(
+                        f"Epoch {current_epoch:3d} | Train Loss: {avg_loss:.4f} | "
+                        f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
+                        log_file,
+                    )
+
+                if current_epoch == warmup_epochs:
+                    log_and_print(
+                        "CE warmup complete. Switching to adaptive loss + RL.",
+                        log_file,
+                    )
 
                 if current_epoch in (50, 100, 150, 200):
                     torch.save(
@@ -261,11 +278,19 @@ def main() -> None:
 
             inputs, targets_batch = inputs.to(device), targets_batch.to(device)
 
-            # SGD step with adaptive loss
+            # Determine current epoch for loss selection
+            approx_epoch = global_step // steps_per_epoch + 1
+
+            # SGD step
             model.train()
             optimizer.zero_grad()
             logits = model(inputs)
-            loss = adaptive_loss(logits, targets_batch)
+
+            if approx_epoch <= warmup_epochs:
+                loss = ce_criterion(logits, targets_batch)
+            else:
+                loss = adaptive_loss(logits, targets_batch)
+
             loss.backward()
             optimizer.step()
 
@@ -274,61 +299,65 @@ def main() -> None:
             global_step += 1
             pbar.update(1)
 
-            # Eq.4: measure val error at every step
-            val_acc_step = fast_evaluate(model, val_images, val_targets)
-            val_error_step = 100.0 - val_acc_step
-            weight = gamma ** (K - j)
-            cumulative_metric += weight * val_error_step
-
-            model.train()  # restore after fast_evaluate sets eval
+            # Eq.4: measure val error at every step (only after warmup)
+            if approx_epoch > warmup_epochs:
+                val_acc_step = fast_evaluate(model, val_images, val_targets)
+                val_error_step = 100.0 - val_acc_step
+                weight = gamma ** (K - j)
+                cumulative_metric += weight * val_error_step
+                model.train()
 
             if global_step >= total_steps:
                 break
 
         # === End of K-step window ===
-        M_new = cumulative_metric
+        approx_epoch = global_step // steps_per_epoch + 1
 
-        # Reward (Eq.5) — from second window onward
-        if M_old is not None and prev_states is not None:
-            reward = compute_reward(M_old, M_new)
-            memory.push(prev_states, prev_actions, prev_log_probs, reward)
-            log_and_print(
-                f"  [Step {global_step}] Reward: {reward:+.1f} | "
-                f"Val Error: {100.0 - fast_evaluate(model, val_images, val_targets):.2f}%",
-                log_file,
+        if approx_epoch > warmup_epochs:
+            # RL active: compute reward, update policy, adjust Phi
+            M_new = cumulative_metric
+
+            # Reward (Eq.5) — from second window onward
+            if M_old is not None and prev_states is not None:
+                reward = compute_reward(M_old, M_new)
+                memory.push(prev_states, prev_actions, prev_log_probs, reward)
+                log_and_print(
+                    f"  [Step {global_step}] Reward: {reward:+.1f} | "
+                    f"Val Error: {100.0 - fast_evaluate(model, val_images, val_targets):.2f}%",
+                    log_file,
+                )
+
+            # Policy update
+            if len(memory) >= policy_batch_size:
+                baseline_ema = update_policy(
+                    policy, policy_optimizer, memory,
+                    policy_batch_size, baseline_ema, device,
+                )
+
+            # Confusion matrix → state → action → Φ update
+            progress = global_step / total_steps
+            C = fast_confusion_matrix(model, val_images, val_targets, num_classes)
+            confusion_history.append(C)
+            if len(confusion_history) > 10:
+                confusion_history.pop(0)
+
+            all_states = construct_states(
+                confusion_history, adaptive_loss.phi.data, progress,
+                num_classes, pair_i, pair_j,
             )
 
-        # Policy update
-        if len(memory) >= policy_batch_size:
-            baseline_ema = update_policy(
-                policy, policy_optimizer, memory,
-                policy_batch_size, baseline_ema, device,
+            with torch.no_grad():
+                actions, log_probs = policy.select_action(all_states)
+
+            delta_phi = actions_to_delta_phi(
+                actions, pair_i, pair_j, num_classes, beta, device,
             )
+            adaptive_loss.update_phi(delta_phi)
 
-        # Confusion matrix → state → action → Φ update
-        progress = global_step / total_steps
-        C = fast_confusion_matrix(model, val_images, val_targets, num_classes)
-        confusion_history.append(C)
-        if len(confusion_history) > 10:
-            confusion_history.pop(0)
-
-        all_states = construct_states(
-            confusion_history, adaptive_loss.phi.data, progress,
-            num_classes, pair_i, pair_j,
-        )
-
-        with torch.no_grad():
-            actions, log_probs = policy.select_action(all_states)
-
-        delta_phi = actions_to_delta_phi(
-            actions, pair_i, pair_j, num_classes, beta, device,
-        )
-        adaptive_loss.update_phi(delta_phi)
-
-        M_old = M_new
-        prev_states = all_states
-        prev_actions = actions
-        prev_log_probs = log_probs
+            M_old = M_new
+            prev_states = all_states
+            prev_actions = actions
+            prev_log_probs = log_probs
 
     pbar.close()
 
