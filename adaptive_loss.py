@@ -40,6 +40,9 @@ class AdaptiveLoss(nn.Module):
         y = F.one_hot(targets, self.num_classes).float()      # (B, C)
         weighted = y @ self.phi                               # (B, C)
         inner = (weighted * log_probs).sum(dim=1)             # (B,)
+        # Clamp to keep sigmoid in a gradient-friendly range
+        # sigmoid(-10) ≈ 4.5e-5, sigmoid(0) = 0.5
+        inner = inner.clamp(-10.0, 0.0)
         sig = torch.sigmoid(inner)                            # (B,)
         return (-sig).mean()
 
