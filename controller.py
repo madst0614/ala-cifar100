@@ -22,6 +22,10 @@ class ALAPolicy(nn.Module):
             nn.ReLU(),
             nn.Linear(32, 3),
         )
+        # Bias last layer toward "no change" (index 1) at initialization
+        # Actions: 0=-beta, 1=0 (no change), 2=+beta
+        with torch.no_grad():
+            self.net[-1].bias.copy_(torch.tensor([-2.0, 2.0, -2.0]))
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """Compute action logits.

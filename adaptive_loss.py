@@ -60,11 +60,11 @@ class AdaptiveLoss(nn.Module):
         self.phi.data = (self.phi.data + self.phi.data.T) / 2
         # Restore diagonal after symmetry averaging
         self.phi.data.fill_diagonal_(1.0)
-        # Clamp off-diagonal only
-        diag = torch.diag(self.phi.data.diag())
-        off_diag = self.phi.data - diag
-        off_diag = off_diag.clamp(-1, 1)
-        self.phi.data = diag + off_diag
+        # Clamp off-diagonal only to [-1, 1]
+        diag_mask = torch.eye(
+            self.num_classes, device=self.phi.device, dtype=torch.bool,
+        )
+        self.phi.data[~diag_mask] = self.phi.data[~diag_mask].clamp(-1, 1)
 
     def reset_phi(self) -> None:
         """Reset Φ to the identity matrix."""

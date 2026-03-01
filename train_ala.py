@@ -141,9 +141,12 @@ def main() -> None:
     beta = 0.1
     policy_batch_size = 8
     warmup_epochs = 10  # First 10 epochs: Φ=I fixed, no RL
+    num_total_pairs = num_classes * (num_classes - 1) // 2  # 4950
+    num_sample_pairs = 200  # Sample 200 pairs per RL step
     pair_i, pair_j = get_pair_indices_tensor(num_classes, device)
 
     total_iterations = 200 * len(train_loader)
+    rl_activated = False
 
     # State tracking
     confusion_history: list[torch.Tensor] = []
@@ -184,6 +187,13 @@ def main() -> None:
 
             # RL controller update every K steps (skip during warmup)
             if global_step % K == 0 and epoch > warmup_epochs:
+                if not rl_activated:
+                    log_and_print(
+                        f"  [Step {global_step}] RL controller activated",
+                        log_file,
+                    )
+                    rl_activated = True
+
                 progress = global_step / total_iterations
 
                 # 1. Validation error
@@ -208,32 +218,43 @@ def main() -> None:
                         policy_batch_size, baseline_ema, device,
                     )
 
-                # 4. Confusion matrix → state
+                # 4. Confusion matrix → state (all pairs)
                 C = compute_confusion_matrix(model, val_loader, num_classes, device)
                 confusion_history.append(C)
                 if len(confusion_history) > 10:
                     confusion_history.pop(0)
 
-                states = construct_states(
+                all_states = construct_states(
                     confusion_history, adaptive_loss.phi.data, progress,
                     num_classes, pair_i, pair_j,
                 )
 
-                # 5. Action sampling
-                with torch.no_grad():
-                    actions, action_log_probs = policy.select_action(states)
+                # 5. Sample 200 pairs out of 4950
+                sample_idx = torch.randperm(
+                    num_total_pairs, device=device,
+                )[:num_sample_pairs]
+                sampled_states = all_states[sample_idx]
 
-                # 6. Phi update
+                # 6. Action sampling (sampled pairs only)
+                with torch.no_grad():
+                    sampled_actions, sampled_log_probs = policy.select_action(
+                        sampled_states,
+                    )
+
+                # 7. Phi update (sampled pairs only)
+                sampled_pair_i = pair_i[sample_idx]
+                sampled_pair_j = pair_j[sample_idx]
                 delta_phi = actions_to_delta_phi(
-                    actions, pair_i, pair_j, num_classes, beta, device,
+                    sampled_actions, sampled_pair_i, sampled_pair_j,
+                    num_classes, beta, device,
                 )
                 adaptive_loss.update_phi(delta_phi)
 
-                # 7. Save state for next reward computation
+                # 8. Save state for next reward computation
                 M_old = M_new
-                prev_states = states
-                prev_actions = actions
-                prev_log_probs = action_log_probs
+                prev_states = sampled_states
+                prev_actions = sampled_actions
+                prev_log_probs = sampled_log_probs
 
                 # Restore train mode
                 model.train()
