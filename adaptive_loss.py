@@ -5,6 +5,8 @@ l_Φ(f_w(x), y) = -σ(y^T Φ log f_w(y|x))
 Φ is a learnable class-relationship matrix updated by an RL controller (Part 3).
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,6 +22,7 @@ class AdaptiveLoss(nn.Module):
     def __init__(self, num_classes: int = 100) -> None:
         super().__init__()
         self.num_classes = num_classes
+        self.scale = math.log(num_classes)
         # Φ is not a trainable parameter — RL agent controls it
         self.phi = nn.Parameter(
             torch.eye(num_classes), requires_grad=False,
@@ -39,7 +42,7 @@ class AdaptiveLoss(nn.Module):
         y = F.one_hot(targets, self.num_classes).float()      # (B, C)
         weighted = y @ self.phi                               # (B, C)
         inner = (weighted * log_probs).sum(dim=1)             # (B,)
-        sig = torch.sigmoid(inner)                               # (B,)
+        sig = torch.sigmoid(inner / self.scale)                   # (B,)
         return (-sig).mean()
 
     def update_phi(self, delta_phi: torch.Tensor) -> None:
