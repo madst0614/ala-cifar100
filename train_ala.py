@@ -126,9 +126,10 @@ def main() -> None:
     model = get_model(device)
     optimizer, scheduler = get_optimizer_and_scheduler(model)
 
-    # Adaptive loss
+    # Adaptive loss + CE for warmup
     num_classes = 100
     adaptive_loss = AdaptiveLoss(num_classes).to(device)
+    ce_criterion = nn.CrossEntropyLoss()
 
     # RL controller
     state_dim = 24
@@ -140,7 +141,7 @@ def main() -> None:
     K = 200
     beta = 0.1
     policy_batch_size = 8
-    warmup_epochs = 10  # First 10 epochs: Φ=I fixed, no RL
+    warmup_epochs = 30  # CE warmup for 30 epochs, then ALA + RL
     num_total_pairs = num_classes * (num_classes - 1) // 2  # 4950
     num_sample_pairs = 200  # Sample 200 pairs per RL step
     pair_i, pair_j = get_pair_indices_tensor(num_classes, device)
@@ -177,7 +178,13 @@ def main() -> None:
 
             optimizer.zero_grad()
             logits = model(inputs)
-            loss = adaptive_loss(logits, targets)
+
+            # Warmup: CE loss; after warmup: adaptive loss
+            if epoch <= warmup_epochs:
+                loss = ce_criterion(logits, targets)
+            else:
+                loss = adaptive_loss(logits, targets)
+
             loss.backward()
             optimizer.step()
 
@@ -185,8 +192,8 @@ def main() -> None:
             total += inputs.size(0)
             global_step += 1
 
-            # RL controller update every K steps (skip during warmup)
-            if global_step % K == 0 and epoch > warmup_epochs:
+            # RL controller update every K steps (after warmup only)
+            if epoch > warmup_epochs and global_step % K == 0:
                 if not rl_activated:
                     log_and_print(
                         f"  [Step {global_step}] RL controller activated",
@@ -269,11 +276,23 @@ def main() -> None:
         val_accs.append(val_acc)
         test_accs.append(test_acc)
 
-        log_and_print(
-            f"Epoch {epoch:3d} | Train Loss: {epoch_loss:.4f} | "
-            f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
-            log_file,
-        )
+        if epoch <= warmup_epochs:
+            log_and_print(
+                f"Epoch {epoch:3d} | CE Warmup | Train Loss: {epoch_loss:.4f} | "
+                f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
+                log_file,
+            )
+            if epoch == warmup_epochs:
+                log_and_print(
+                    "CE warmup complete. Switching to adaptive loss + RL controller.",
+                    log_file,
+                )
+        else:
+            log_and_print(
+                f"Epoch {epoch:3d} | Train Loss: {epoch_loss:.4f} | "
+                f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
+                log_file,
+            )
 
         # Save phi at checkpoints
         if epoch in (50, 100, 150, 200):
