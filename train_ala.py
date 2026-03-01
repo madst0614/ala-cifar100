@@ -1,15 +1,19 @@
 """Part 4c: Full ALA training loop following Algorithm 1 of the paper.
 
-Training is structured around K-step windows. Within each window, every SGD
-step is followed by a full validation evaluation to compute the cumulative
-discounted metric (Eq.4). At window boundaries the RL controller computes
-reward, updates the policy, and adjusts Φ.
+Training is structured around K-step windows (K=200). Within each window,
+every SGD step is followed by a fast GPU-resident validation evaluation to
+compute the cumulative discounted metric (Eq.4). At window boundaries the
+RL controller computes reward (Eq.5), updates the policy, and adjusts Phi.
+
+GPU memory optimization: val/test sets are pre-loaded onto GPU to eliminate
+CPU-GPU transfer overhead during the ~200 val evals per K-window.
 """
 
 import os
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 import matplotlib
 
@@ -20,17 +24,71 @@ from utils import (
     set_seed,
     get_dataloaders,
     get_model,
-    evaluate,
     get_optimizer_and_scheduler,
 )
 from adaptive_loss import AdaptiveLoss
-from state import compute_confusion_matrix, construct_states, get_pair_indices_tensor
+from state import construct_states, get_pair_indices_tensor
 from controller import (
     ALAPolicy,
     ReplayMemory,
     compute_reward,
 )
 
+
+# ---------------------------------------------------------------------------
+# Fast GPU-resident evaluation helpers
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def fast_evaluate(
+    model: nn.Module,
+    images: torch.Tensor,
+    targets: torch.Tensor,
+    batch_size: int = 2048,
+) -> float:
+    """Compute accuracy using GPU-resident data. No CPU-GPU transfer."""
+    model.eval()
+    correct = 0
+    with torch.cuda.amp.autocast():
+        for i in range(0, len(images), batch_size):
+            logits = model(images[i:i + batch_size])
+            correct += (logits.argmax(1) == targets[i:i + batch_size]).sum().item()
+    return correct / len(images) * 100.0
+
+
+@torch.no_grad()
+def fast_confusion_matrix(
+    model: nn.Module,
+    images: torch.Tensor,
+    targets: torch.Tensor,
+    num_classes: int,
+    batch_size: int = 2048,
+) -> torch.Tensor:
+    """Compute Eq.7 confusion matrix using GPU-resident data."""
+    model.eval()
+    C = torch.zeros(num_classes, num_classes, device=images.device)
+    class_counts = torch.zeros(num_classes, device=images.device)
+
+    with torch.cuda.amp.autocast():
+        for i in range(0, len(images), batch_size):
+            logits = model(images[i:i + batch_size])
+            neg_log_probs = -F.log_softmax(logits.float(), dim=1)
+            batch_targets = targets[i:i + batch_size]
+
+            C.index_add_(0, batch_targets, neg_log_probs)
+            class_counts.scatter_add_(
+                0, batch_targets,
+                torch.ones(batch_targets.size(0), device=images.device),
+            )
+
+    nonzero = class_counts > 0
+    C[nonzero] /= class_counts[nonzero].unsqueeze(1)
+    return C
+
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
 
 def actions_to_delta_phi(
     actions: torch.Tensor,
@@ -40,26 +98,13 @@ def actions_to_delta_phi(
     beta: float,
     device: torch.device,
 ) -> torch.Tensor:
-    """Convert action indices to a delta_phi matrix.
-
-    Args:
-        actions: (num_pairs,) indices in {0, 1, 2} mapping to {-beta, 0, +beta}.
-        pair_i: (num_pairs,) tensor of row indices.
-        pair_j: (num_pairs,) tensor of column indices.
-        num_classes: number of classes.
-        beta: step size for phi updates.
-        device: torch device.
-
-    Returns:
-        (num_classes, num_classes) symmetric delta_phi tensor.
-    """
+    """Convert action indices to a symmetric delta_phi matrix."""
     action_map = torch.tensor([-beta, 0.0, beta], device=device)
-    delta_values = action_map[actions]  # (num_pairs,)
+    delta_values = action_map[actions]
 
     delta_phi = torch.zeros(num_classes, num_classes, device=device)
     delta_phi[pair_i, pair_j] = delta_values
-    delta_phi[pair_j, pair_i] = delta_values  # symmetry
-
+    delta_phi[pair_j, pair_i] = delta_values
     return delta_phi
 
 
@@ -71,22 +116,7 @@ def update_policy(
     baseline_ema: float,
     device: torch.device,
 ) -> float:
-    """REINFORCE policy gradient update.
-
-    Re-computes log_probs via a fresh forward pass so that gradients
-    flow back through the policy network.
-
-    Args:
-        policy: the policy network.
-        optimizer: policy optimizer.
-        memory: replay memory.
-        batch_size: number of transitions to sample.
-        baseline_ema: exponential moving average baseline for variance reduction.
-        device: torch device.
-
-    Returns:
-        Updated baseline_ema.
-    """
+    """REINFORCE policy gradient update with EMA baseline."""
     samples = memory.sample(batch_size)
 
     total_loss = torch.tensor(0.0, device=device)
@@ -113,19 +143,20 @@ def update_policy(
 
     avg_reward = total_reward / len(samples)
     baseline_ema = 0.9 * baseline_ema + 0.1 * avg_reward
-
     return baseline_ema
 
 
 def log_and_print(msg: str, log_file) -> None:
-    """Print message and write to log file."""
     tqdm.write(msg)
     log_file.write(msg + "\n")
     log_file.flush()
 
 
+# ---------------------------------------------------------------------------
+# Main training loop
+# ---------------------------------------------------------------------------
+
 def main() -> None:
-    """Run full ALA training following Algorithm 1 of the paper."""
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -134,7 +165,7 @@ def main() -> None:
     model = get_model(device)
     optimizer, scheduler = get_optimizer_and_scheduler(model)
 
-    # Adaptive loss
+    # Adaptive loss — no CE warmup, adaptive from step 1
     num_classes = 100
     adaptive_loss = AdaptiveLoss(num_classes).to(device)
 
@@ -153,6 +184,16 @@ def main() -> None:
 
     steps_per_epoch = len(train_loader)
     total_steps = 200 * steps_per_epoch
+
+    # -----------------------------------------------------------------------
+    # GPU preload val/test sets (~240 MB total on A100 40GB)
+    # -----------------------------------------------------------------------
+    print("Pre-loading val/test data onto GPU...")
+    val_images = torch.cat([x for x, _ in val_loader]).to(device)
+    val_targets = torch.cat([y for _, y in val_loader]).to(device)
+    test_images = torch.cat([x for x, _ in test_loader]).to(device)
+    test_targets = torch.cat([y for _, y in test_loader]).to(device)
+    print(f"  val: {val_images.shape}, test: {test_images.shape}")
 
     # State tracking
     confusion_history: list[torch.Tensor] = []
@@ -174,76 +215,73 @@ def main() -> None:
 
     # K-window based training loop
     global_step = 0
-    current_epoch = 1
-    epoch_running_loss = 0.0
+    current_epoch = 0
+    epoch_loss = 0.0
     epoch_total = 0
     train_iter = iter(train_loader)
 
     pbar = tqdm(total=total_steps, desc="ALA Training", unit="step")
 
     while global_step < total_steps:
-        # === One K-step window ===
+        # === One K-step window (Eq.4) ===
         cumulative_metric = 0.0
 
         for j in range(1, K + 1):
             # Get next training batch (handle epoch boundary)
             try:
-                inputs, targets = next(train_iter)
+                inputs, targets_batch = next(train_iter)
             except StopIteration:
-                # Epoch complete — log, step scheduler, reset
-                epoch_loss = epoch_running_loss / max(epoch_total, 1)
-                val_acc = evaluate(model, val_loader, device)
-                test_acc = evaluate(model, test_loader, device)
-                scheduler.step()
+                # Epoch complete — log, scheduler step, reset
+                current_epoch += 1
+                avg_loss = epoch_loss / max(epoch_total, 1)
+                val_acc = fast_evaluate(model, val_images, val_targets)
+                test_acc = fast_evaluate(model, test_images, test_targets)
 
-                train_losses.append(epoch_loss)
+                train_losses.append(avg_loss)
                 val_accs.append(val_acc)
                 test_accs.append(test_acc)
 
                 log_and_print(
-                    f"Epoch {current_epoch:3d} | Train Loss: {epoch_loss:.4f} | "
+                    f"Epoch {current_epoch:3d} | Train Loss: {avg_loss:.4f} | "
                     f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
                     log_file,
                 )
 
-                # Save phi at checkpoints
                 if current_epoch in (50, 100, 150, 200):
                     torch.save(
                         adaptive_loss.phi.data.cpu(),
                         f"results/phi_heatmaps/phi_epoch_{current_epoch:03d}.pt",
                     )
 
-                current_epoch += 1
-                epoch_running_loss = 0.0
+                scheduler.step()
+                epoch_loss = 0.0
                 epoch_total = 0
                 train_iter = iter(train_loader)
-                inputs, targets = next(train_iter)
+                inputs, targets_batch = next(train_iter)
 
-            inputs, targets = inputs.to(device), targets.to(device)
+            inputs, targets_batch = inputs.to(device), targets_batch.to(device)
 
             # SGD step with adaptive loss
             model.train()
             optimizer.zero_grad()
             logits = model(inputs)
-            loss = adaptive_loss(logits, targets)
+            loss = adaptive_loss(logits, targets_batch)
             loss.backward()
             optimizer.step()
 
-            epoch_running_loss += loss.item() * inputs.size(0)
+            epoch_loss += loss.item() * inputs.size(0)
             epoch_total += inputs.size(0)
             global_step += 1
             pbar.update(1)
 
-            # Val evaluation for cumulative metric (Eq.4)
-            model.eval()
-            with torch.no_grad():
-                val_acc_j = evaluate(model, val_loader, device)
-            val_error_j = 100.0 - val_acc_j
-
+            # Eq.4: measure val error at every step
+            val_acc_step = fast_evaluate(model, val_images, val_targets)
+            val_error_step = 100.0 - val_acc_step
             weight = gamma ** (K - j)
-            cumulative_metric += weight * val_error_j
+            cumulative_metric += weight * val_error_step
 
-            # Stop if we've reached total steps
+            model.train()  # restore after fast_evaluate sets eval
+
             if global_step >= total_steps:
                 break
 
@@ -256,7 +294,7 @@ def main() -> None:
             memory.push(prev_states, prev_actions, prev_log_probs, reward)
             log_and_print(
                 f"  [Step {global_step}] Reward: {reward:+.1f} | "
-                f"M: {M_new:.2f}",
+                f"Val Error: {100.0 - fast_evaluate(model, val_images, val_targets):.2f}%",
                 log_file,
             )
 
@@ -269,44 +307,44 @@ def main() -> None:
 
         # Confusion matrix → state → action → Φ update
         progress = global_step / total_steps
-        C = compute_confusion_matrix(model, val_loader, num_classes, device)
+        C = fast_confusion_matrix(model, val_images, val_targets, num_classes)
         confusion_history.append(C)
         if len(confusion_history) > 10:
             confusion_history.pop(0)
 
-        states = construct_states(
+        all_states = construct_states(
             confusion_history, adaptive_loss.phi.data, progress,
             num_classes, pair_i, pair_j,
         )
 
         with torch.no_grad():
-            actions, action_log_probs = policy.select_action(states)
+            actions, log_probs = policy.select_action(all_states)
 
         delta_phi = actions_to_delta_phi(
             actions, pair_i, pair_j, num_classes, beta, device,
         )
         adaptive_loss.update_phi(delta_phi)
 
-        # Save for next window
         M_old = M_new
-        prev_states = states
+        prev_states = all_states
         prev_actions = actions
-        prev_log_probs = action_log_probs
+        prev_log_probs = log_probs
 
     pbar.close()
 
-    # Log final epoch if it hasn't been logged yet
+    # Log final epoch if there are pending samples
     if epoch_total > 0:
-        epoch_loss = epoch_running_loss / epoch_total
-        val_acc = evaluate(model, val_loader, device)
-        test_acc = evaluate(model, test_loader, device)
+        current_epoch += 1
+        avg_loss = epoch_loss / epoch_total
+        val_acc = fast_evaluate(model, val_images, val_targets)
+        test_acc = fast_evaluate(model, test_images, test_targets)
 
-        train_losses.append(epoch_loss)
+        train_losses.append(avg_loss)
         val_accs.append(val_acc)
         test_accs.append(test_acc)
 
         log_and_print(
-            f"Epoch {current_epoch:3d} | Train Loss: {epoch_loss:.4f} | "
+            f"Epoch {current_epoch:3d} | Train Loss: {avg_loss:.4f} | "
             f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
             log_file,
         )
