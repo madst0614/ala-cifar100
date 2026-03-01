@@ -43,6 +43,7 @@ class AdaptiveLoss(nn.Module):
         weighted_normalized = weighted / norm
         inner = (weighted_normalized * log_probs).sum(dim=1)  # (B,)
         sig = torch.sigmoid(inner)                             # (B,)
+        self._last_inner = inner.detach()
         return (-sig).mean()
 
     def update_phi(self, delta_phi: torch.Tensor) -> None:
