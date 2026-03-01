@@ -352,7 +352,10 @@ def main() -> None:
             delta_phi = actions_to_delta_phi(
                 actions, pair_i, pair_j, num_classes, beta, device,
             )
-            adaptive_loss.update_phi(delta_phi)
+            # RL 활성화 후 첫 50개 K-window 동안 delta_phi를 점진적으로 키움
+            rl_steps_since_warmup = (global_step - warmup_epochs * steps_per_epoch) // K
+            phi_scale = min(rl_steps_since_warmup / 50.0, 1.0)
+            adaptive_loss.update_phi(delta_phi * phi_scale)
 
             M_old = M_new
             prev_states = all_states
