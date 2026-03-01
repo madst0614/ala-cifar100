@@ -1,4 +1,10 @@
-"""Part 4c: Full ALA training loop following Algorithm 1 of the paper."""
+"""Part 4c: Full ALA training loop following Algorithm 1 of the paper.
+
+Training is structured around K-step windows. Within each window, every SGD
+step is followed by a full validation evaluation to compute the cumulative
+discounted metric (Eq.4). At window boundaries the RL controller computes
+reward, updates the policy, and adjusts Φ.
+"""
 
 import os
 
@@ -22,7 +28,6 @@ from state import compute_confusion_matrix, construct_states, get_pair_indices_t
 from controller import (
     ALAPolicy,
     ReplayMemory,
-    compute_discounted_metric,
     compute_reward,
 )
 
@@ -91,7 +96,6 @@ def update_policy(
         states = states.to(device)
         actions = actions.to(device)
 
-        # Re-forward through policy to get fresh log_probs with grad
         logits = policy(states)
         dist = torch.distributions.Categorical(logits=logits)
         new_log_probs = dist.log_prob(actions)
@@ -107,7 +111,6 @@ def update_policy(
     total_loss.backward()
     optimizer.step()
 
-    # Update baseline EMA
     avg_reward = total_reward / len(samples)
     baseline_ema = 0.9 * baseline_ema + 0.1 * avg_reward
 
@@ -145,12 +148,11 @@ def main() -> None:
     K = 200
     beta = 0.1
     gamma = 0.9
-    N_eval = 20
-    eval_interval = K // N_eval  # 10 steps
     policy_batch_size = 8
     pair_i, pair_j = get_pair_indices_tensor(num_classes, device)
 
-    total_iterations = 200 * len(train_loader)
+    steps_per_epoch = len(train_loader)
+    total_steps = 200 * steps_per_epoch
 
     # State tracking
     confusion_history: list[torch.Tensor] = []
@@ -159,10 +161,6 @@ def main() -> None:
     prev_actions: torch.Tensor | None = None
     prev_log_probs: torch.Tensor | None = None
     baseline_ema = 0.0
-
-    # Cumulative reward tracking within K-step window
-    eval_points: list[tuple[int, float]] = []
-    steps_in_window = 0
 
     # Logging
     os.makedirs("results/curves", exist_ok=True)
@@ -173,120 +171,157 @@ def main() -> None:
     test_accs: list[float] = []
 
     log_file = open("results/ala_training_log.txt", "w")
+
+    # K-window based training loop
     global_step = 0
+    current_epoch = 1
+    epoch_running_loss = 0.0
+    epoch_total = 0
+    train_iter = iter(train_loader)
 
-    for epoch in tqdm(range(1, 201), desc="ALA Training"):
-        model.train()
-        running_loss = 0.0
-        total = 0
+    pbar = tqdm(total=total_steps, desc="ALA Training", unit="step")
 
-        for inputs, targets in train_loader:
+    while global_step < total_steps:
+        # === One K-step window ===
+        cumulative_metric = 0.0
+
+        for j in range(1, K + 1):
+            # Get next training batch (handle epoch boundary)
+            try:
+                inputs, targets = next(train_iter)
+            except StopIteration:
+                # Epoch complete — log, step scheduler, reset
+                epoch_loss = epoch_running_loss / max(epoch_total, 1)
+                val_acc = evaluate(model, val_loader, device)
+                test_acc = evaluate(model, test_loader, device)
+                scheduler.step()
+
+                train_losses.append(epoch_loss)
+                val_accs.append(val_acc)
+                test_accs.append(test_acc)
+
+                log_and_print(
+                    f"Epoch {current_epoch:3d} | Train Loss: {epoch_loss:.4f} | "
+                    f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
+                    log_file,
+                )
+
+                # Save phi at checkpoints
+                if current_epoch in (50, 100, 150, 200):
+                    torch.save(
+                        adaptive_loss.phi.data.cpu(),
+                        f"results/phi_heatmaps/phi_epoch_{current_epoch:03d}.pt",
+                    )
+
+                current_epoch += 1
+                epoch_running_loss = 0.0
+                epoch_total = 0
+                train_iter = iter(train_loader)
+                inputs, targets = next(train_iter)
+
             inputs, targets = inputs.to(device), targets.to(device)
 
+            # SGD step with adaptive loss
+            model.train()
             optimizer.zero_grad()
             logits = model(inputs)
             loss = adaptive_loss(logits, targets)
             loss.backward()
             optimizer.step()
 
-            running_loss += loss.item() * inputs.size(0)
-            total += inputs.size(0)
+            epoch_running_loss += loss.item() * inputs.size(0)
+            epoch_total += inputs.size(0)
             global_step += 1
-            steps_in_window += 1
+            pbar.update(1)
 
-            # Collect val error at N_eval evenly spaced points within K-window
-            if steps_in_window % eval_interval == 0 and steps_in_window <= K:
-                model.eval()
-                val_acc_mid = evaluate(model, val_loader, device)
-                val_error_mid = 100.0 - val_acc_mid
-                eval_points.append((steps_in_window, val_error_mid))
-                model.train()
+            # Val evaluation for cumulative metric (Eq.4)
+            model.eval()
+            with torch.no_grad():
+                val_acc_j = evaluate(model, val_loader, device)
+            val_error_j = 100.0 - val_acc_j
 
-            # RL controller update at end of K-step window
-            if global_step % K == 0:
-                progress = global_step / total_iterations
+            weight = gamma ** (K - j)
+            cumulative_metric += weight * val_error_j
 
-                # 1. Cumulative metric (Eq.4)
-                M_new = compute_discounted_metric(eval_points, K, gamma)
+            # Stop if we've reached total steps
+            if global_step >= total_steps:
+                break
 
-                # 2. Reward computation (from second window onward)
-                if M_old is not None and prev_states is not None:
-                    reward = compute_reward(M_old, M_new)
-                    memory.push(prev_states, prev_actions, prev_log_probs, reward)
-                    log_and_print(
-                        f"  [Step {global_step}] Reward: {reward:+.1f} | "
-                        f"M: {M_new:.2f}",
-                        log_file,
-                    )
+        # === End of K-step window ===
+        M_new = cumulative_metric
 
-                # 3. Policy update
-                if len(memory) >= policy_batch_size:
-                    baseline_ema = update_policy(
-                        policy, policy_optimizer, memory,
-                        policy_batch_size, baseline_ema, device,
-                    )
+        # Reward (Eq.5) — from second window onward
+        if M_old is not None and prev_states is not None:
+            reward = compute_reward(M_old, M_new)
+            memory.push(prev_states, prev_actions, prev_log_probs, reward)
+            log_and_print(
+                f"  [Step {global_step}] Reward: {reward:+.1f} | "
+                f"M: {M_new:.2f}",
+                log_file,
+            )
 
-                # 4. Confusion matrix → state (all pairs)
-                C = compute_confusion_matrix(model, val_loader, num_classes, device)
-                confusion_history.append(C)
-                if len(confusion_history) > 10:
-                    confusion_history.pop(0)
+        # Policy update
+        if len(memory) >= policy_batch_size:
+            baseline_ema = update_policy(
+                policy, policy_optimizer, memory,
+                policy_batch_size, baseline_ema, device,
+            )
 
-                states = construct_states(
-                    confusion_history, adaptive_loss.phi.data, progress,
-                    num_classes, pair_i, pair_j,
-                )
+        # Confusion matrix → state → action → Φ update
+        progress = global_step / total_steps
+        C = compute_confusion_matrix(model, val_loader, num_classes, device)
+        confusion_history.append(C)
+        if len(confusion_history) > 10:
+            confusion_history.pop(0)
 
-                # 5. Action sampling (all pairs)
-                with torch.no_grad():
-                    actions, action_log_probs = policy.select_action(states)
+        states = construct_states(
+            confusion_history, adaptive_loss.phi.data, progress,
+            num_classes, pair_i, pair_j,
+        )
 
-                # 6. Phi update (all pairs)
-                delta_phi = actions_to_delta_phi(
-                    actions, pair_i, pair_j, num_classes, beta, device,
-                )
-                adaptive_loss.update_phi(delta_phi)
+        with torch.no_grad():
+            actions, action_log_probs = policy.select_action(states)
 
-                # 7. Save state for next reward computation
-                M_old = M_new
-                prev_states = states
-                prev_actions = actions
-                prev_log_probs = action_log_probs
+        delta_phi = actions_to_delta_phi(
+            actions, pair_i, pair_j, num_classes, beta, device,
+        )
+        adaptive_loss.update_phi(delta_phi)
 
-                # Reset window
-                eval_points = []
-                steps_in_window = 0
+        # Save for next window
+        M_old = M_new
+        prev_states = states
+        prev_actions = actions
+        prev_log_probs = action_log_probs
 
-                # Restore train mode
-                model.train()
+    pbar.close()
 
-        # End of epoch
-        epoch_loss = running_loss / total
+    # Log final epoch if it hasn't been logged yet
+    if epoch_total > 0:
+        epoch_loss = epoch_running_loss / epoch_total
         val_acc = evaluate(model, val_loader, device)
         test_acc = evaluate(model, test_loader, device)
-        scheduler.step()
 
         train_losses.append(epoch_loss)
         val_accs.append(val_acc)
         test_accs.append(test_acc)
 
         log_and_print(
-            f"Epoch {epoch:3d} | Train Loss: {epoch_loss:.4f} | "
+            f"Epoch {current_epoch:3d} | Train Loss: {epoch_loss:.4f} | "
             f"Val Acc: {val_acc:.2f}% | Test Acc: {test_acc:.2f}%",
             log_file,
         )
 
-        # Save phi at checkpoints
-        if epoch in (50, 100, 150, 200):
+        if current_epoch in (50, 100, 150, 200):
             torch.save(
                 adaptive_loss.phi.data.cpu(),
-                f"results/phi_heatmaps/phi_epoch_{epoch:03d}.pt",
+                f"results/phi_heatmaps/phi_epoch_{current_epoch:03d}.pt",
             )
 
     log_file.close()
 
     # Save curves
-    epochs = range(1, 201)
+    num_epochs = len(train_losses)
+    epochs = range(1, num_epochs + 1)
 
     plt.figure()
     plt.plot(epochs, train_losses)
