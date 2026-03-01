@@ -18,13 +18,14 @@ from utils import (
     get_optimizer_and_scheduler,
 )
 from adaptive_loss import AdaptiveLoss
-from state import compute_confusion_matrix, construct_states, get_pair_indices
+from state import compute_confusion_matrix, construct_states, get_pair_indices_tensor
 from controller import ALAPolicy, ReplayMemory, compute_reward
 
 
 def actions_to_delta_phi(
     actions: torch.Tensor,
-    pair_indices: list[tuple[int, int]],
+    pair_i: torch.Tensor,
+    pair_j: torch.Tensor,
     num_classes: int,
     beta: float,
     device: torch.device,
@@ -33,7 +34,8 @@ def actions_to_delta_phi(
 
     Args:
         actions: (num_pairs,) indices in {0, 1, 2} mapping to {-beta, 0, +beta}.
-        pair_indices: list of (i, j) upper-triangular pairs.
+        pair_i: (num_pairs,) tensor of row indices.
+        pair_j: (num_pairs,) tensor of column indices.
         num_classes: number of classes.
         beta: step size for phi updates.
         device: torch device.
@@ -45,9 +47,8 @@ def actions_to_delta_phi(
     delta_values = action_map[actions]  # (num_pairs,)
 
     delta_phi = torch.zeros(num_classes, num_classes, device=device)
-    for idx, (i, j) in enumerate(pair_indices):
-        delta_phi[i, j] = delta_values[idx]
-        delta_phi[j, i] = delta_values[idx]  # symmetry
+    delta_phi[pair_i, pair_j] = delta_values
+    delta_phi[pair_j, pair_i] = delta_values  # symmetry
 
     return delta_phi
 
@@ -139,7 +140,7 @@ def main() -> None:
     K = 200
     beta = 0.1
     policy_batch_size = 8
-    pair_indices = get_pair_indices(num_classes)
+    pair_i, pair_j = get_pair_indices_tensor(num_classes, device)
 
     total_iterations = 200 * len(train_loader)
 
@@ -213,7 +214,8 @@ def main() -> None:
                     confusion_history.pop(0)
 
                 states = construct_states(
-                    confusion_history, adaptive_loss.phi.data, progress, num_classes,
+                    confusion_history, adaptive_loss.phi.data, progress,
+                    num_classes, pair_i, pair_j,
                 )
 
                 # 5. Action sampling
@@ -222,7 +224,7 @@ def main() -> None:
 
                 # 6. Phi update
                 delta_phi = actions_to_delta_phi(
-                    actions, pair_indices, num_classes, beta, device,
+                    actions, pair_i, pair_j, num_classes, beta, device,
                 )
                 adaptive_loss.update_phi(delta_phi)
 

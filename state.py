@@ -20,7 +20,6 @@ def compute_confusion_matrix(
         (num_classes, num_classes) tensor.
     """
     model.eval()
-    # Accumulate negative log-probs per true class
     confusion = torch.zeros(num_classes, num_classes, device=device)
     class_counts = torch.zeros(num_classes, device=device)
 
@@ -31,11 +30,11 @@ def compute_confusion_matrix(
             probs = F.softmax(logits, dim=1)
             neg_log_probs = -torch.log(probs + 1e-8)  # (B, C)
 
-            for c in range(num_classes):
-                mask = targets == c
-                if mask.any():
-                    confusion[c] += neg_log_probs[mask].sum(dim=0)
-                    class_counts[c] += mask.sum()
+            # Vectorized accumulation via index_add
+            confusion.index_add_(0, targets, neg_log_probs)
+            class_counts.scatter_add_(
+                0, targets, torch.ones(targets.size(0), device=device),
+            )
 
     # Normalize by class counts
     class_counts = class_counts.clamp(min=1e-8)
@@ -49,11 +48,23 @@ def get_pair_indices(num_classes: int = 100) -> list[tuple[int, int]]:
     return [(i, j) for i in range(num_classes) for j in range(i + 1, num_classes)]
 
 
+def get_pair_indices_tensor(
+    num_classes: int, device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return (pair_i, pair_j) as tensors for vectorized indexing."""
+    indices = get_pair_indices(num_classes)
+    pair_i = torch.tensor([p[0] for p in indices], device=device)
+    pair_j = torch.tensor([p[1] for p in indices], device=device)
+    return pair_i, pair_j
+
+
 def construct_states(
     confusion_history: list[torch.Tensor],
     phi: torch.Tensor,
     progress: float,
     num_classes: int = 100,
+    pair_i: torch.Tensor | None = None,
+    pair_j: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Construct state vectors for all upper-triangular class pairs.
 
@@ -66,42 +77,38 @@ def construct_states(
     Returns:
         (num_pairs, 24) tensor where num_pairs = num_classes*(num_classes-1)//2 = 4950.
     """
-    pair_indices = get_pair_indices(num_classes)
-    num_pairs = len(pair_indices)
     device = phi.device
+    num_pairs = num_classes * (num_classes - 1) // 2
 
-    # Collect time series: (T, num_pairs, 2)
+    # Build pair index tensors if not provided
+    if pair_i is None or pair_j is None:
+        pair_i, pair_j = get_pair_indices_tensor(num_classes, device)
+
     T = len(confusion_history)
     max_T = 10
+    valid_steps = min(T, max_T)
 
-    # Pre-extract [C_ij, C_ji] for all pairs across all timesteps
+    # Extract time series via advanced indexing: (max_T, num_pairs, 2)
     ts_data = torch.zeros(max_T, num_pairs, 2, device=device)
-    for t_idx in range(min(T, max_T)):
-        # Use most recent entries, padded from the left with zeros
-        actual_idx = T - min(T, max_T) + t_idx
+    for t_idx in range(valid_steps):
+        actual_idx = T - valid_steps + t_idx
         C = confusion_history[actual_idx]
-        for p_idx, (i, j) in enumerate(pair_indices):
-            ts_data[t_idx, p_idx, 0] = C[i, j]
-            ts_data[t_idx, p_idx, 1] = C[j, i]
+        ts_data[t_idx, :, 0] = C[pair_i, pair_j]
+        ts_data[t_idx, :, 1] = C[pair_j, pair_i]
 
     # 1. Time series flattened: (num_pairs, 20)
     ts_flat = ts_data.permute(1, 0, 2).reshape(num_pairs, max_T * 2)
 
     # 2. Relative change: (num_pairs, 2)
     if T > 1:
-        # Current values
-        current = ts_data[min(T, max_T) - 1]  # (num_pairs, 2)
-        # Mean of history
-        valid_steps = min(T, max_T)
-        mean_vals = ts_data[:valid_steps].mean(dim=0)  # (num_pairs, 2)
+        current = ts_data[valid_steps - 1]               # (num_pairs, 2)
+        mean_vals = ts_data[:valid_steps].mean(dim=0)     # (num_pairs, 2)
         relative_change = (current - mean_vals) / (mean_vals + 1e-8)
     else:
         relative_change = torch.zeros(num_pairs, 2, device=device)
 
-    # 3. Current phi values: (num_pairs, 1)
-    phi_vals = torch.zeros(num_pairs, 1, device=device)
-    for p_idx, (i, j) in enumerate(pair_indices):
-        phi_vals[p_idx, 0] = phi[i, j]
+    # 3. Current phi values via advanced indexing: (num_pairs, 1)
+    phi_vals = phi[pair_i, pair_j].unsqueeze(1)
 
     # 4. Progress: (num_pairs, 1)
     progress_vals = torch.full((num_pairs, 1), progress, device=device)
