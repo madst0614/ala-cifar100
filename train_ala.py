@@ -346,11 +346,12 @@ def main() -> None:
             if M_old is not None and prev_states is not None:
                 reward = compute_reward(M_old, M_new)
                 memory.push(prev_states, prev_actions, prev_log_probs, reward)
-                log_and_print(
+                reward_val_error = 100.0 - fast_evaluate(model, val_images, val_targets)
+                _reward_str = (
                     f"  [Step {global_step}] Reward: {reward:+.1f} | "
-                    f"Val Error: {100.0 - fast_evaluate(model, val_images, val_targets):.2f}%",
-                    log_file,
+                    f"Val Error: {reward_val_error:.2f}%"
                 )
+                # will be extended with action/row stats below
 
             # Policy update
             if len(memory) >= policy_batch_size:
@@ -377,6 +378,30 @@ def main() -> None:
             delta_phi = actions_to_delta_phi(
                 actions, pair_i, pair_j, num_classes, beta, device,
             )
+
+            # Action distribution
+            n_plus = (actions == 2).sum().item()
+            n_zero = (actions == 1).sum().item()
+            n_minus = (actions == 0).sum().item()
+            total_actions = actions.numel()
+            # Phi row-mean stats
+            phi_row_tmp = adaptive_loss.phi.data.clone()
+            phi_row_tmp.fill_diagonal_(0)
+            row_means = phi_row_tmp.sum(dim=1) / (num_classes - 1)
+            row_mean_min = row_means.min().item()
+            row_mean_max = row_means.max().item()
+            row_mean_std = row_means.std().item()
+            if M_old is not None and prev_states is not None:
+                log_and_print(
+                    _reward_str
+                    + f" | Actions: +={n_plus}({n_plus/total_actions*100:.0f}%)"
+                    f" 0={n_zero}({n_zero/total_actions*100:.0f}%)"
+                    f" -={n_minus}({n_minus/total_actions*100:.0f}%)"
+                    f" | RowMean: [{row_mean_min:.4f}, {row_mean_max:.4f}]"
+                    f" std={row_mean_std:.4f}",
+                    log_file,
+                )
+
             adaptive_loss.update_phi(delta_phi * 0.01)
             # Global mean subtraction: off-diagonal 평균을 0으로
             mask = ~torch.eye(num_classes, dtype=bool, device=device)
