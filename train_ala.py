@@ -377,7 +377,7 @@ def main() -> None:
             delta_phi = actions_to_delta_phi(
                 actions, pair_i, pair_j, num_classes, beta, device,
             )
-            adaptive_loss.update_phi(delta_phi)
+            adaptive_loss.update_phi(delta_phi * 0.01)
 
             M_old = M_new
             prev_states = all_states
