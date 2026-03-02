@@ -402,7 +402,7 @@ def main() -> None:
                     log_file,
                 )
 
-            adaptive_loss.update_phi(delta_phi * 0.01)
+            adaptive_loss.update_phi(delta_phi * 0.001)
 
             M_old = M_new
             prev_states = all_states
