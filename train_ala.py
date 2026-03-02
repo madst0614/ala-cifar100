@@ -221,6 +221,7 @@ def main() -> None:
     current_epoch = 0
     epoch_loss = 0.0
     epoch_total = 0
+    last_grad_norm = 0.0
     train_iter = iter(train_loader)
 
     pbar = tqdm(total=total_steps, desc="ALA Training", unit="step")
@@ -263,6 +264,33 @@ def main() -> None:
                         log_file,
                     )
 
+                if current_epoch == warmup_epochs:
+                    log_and_print(
+                        "CE warmup complete. Switching to adaptive loss + RL.",
+                        log_file,
+                    )
+
+                # Debug: gradient norm, inner product, phi stats
+                model.eval()
+                with torch.no_grad():
+                    dbg_logits = model(val_images[:2048])
+                    dbg_log_probs = F.log_softmax(dbg_logits, dim=1)
+                    dbg_y = F.one_hot(val_targets[:2048], num_classes).float()
+                    dbg_weighted = dbg_y @ adaptive_loss.phi.data
+                    dbg_inner = (dbg_weighted * dbg_log_probs).sum(dim=1)
+                    dbg_sig_mean = torch.sigmoid(dbg_inner).mean()
+                dbg_mask = ~torch.eye(num_classes, dtype=torch.bool, device=device)
+                dbg_off = adaptive_loss.phi.data[dbg_mask]
+                log_and_print(
+                    f"  [Debug] GradNorm: {last_grad_norm:.4f} | "
+                    f"Inner: mean={dbg_inner.mean():.2f} std={dbg_inner.std():.2f} "
+                    f"min={dbg_inner.min():.2f} max={dbg_inner.max():.2f} | "
+                    f"Sig: {dbg_sig_mean:.4f} | "
+                    f"Phi: mean={dbg_off.mean():.4f} std={dbg_off.std():.4f} "
+                    f"[{dbg_off.min():.4f}, {dbg_off.max():.4f}]",
+                    log_file,
+                )
+
                 if current_epoch in (50, 100, 150, 200):
                     torch.save(
                         adaptive_loss.phi.data.cpu(),
@@ -291,6 +319,9 @@ def main() -> None:
                 loss = adaptive_loss(logits, targets_batch)
 
             loss.backward()
+            last_grad_norm = (sum(
+                p.grad.norm() ** 2 for p in model.parameters() if p.grad is not None
+            ) ** 0.5).item()
             optimizer.step()
 
             epoch_loss += loss.item() * inputs.size(0)
@@ -320,11 +351,12 @@ def main() -> None:
             if M_old is not None and prev_states is not None:
                 reward = compute_reward(M_old, M_new)
                 memory.push(prev_states, prev_actions, prev_log_probs, reward)
-                log_and_print(
+                reward_val_error = 100.0 - fast_evaluate(model, val_images, val_targets)
+                _reward_str = (
                     f"  [Step {global_step}] Reward: {reward:+.1f} | "
-                    f"Val Error: {100.0 - fast_evaluate(model, val_images, val_targets):.2f}%",
-                    log_file,
+                    f"Val Error: {reward_val_error:.2f}%"
                 )
+                # will be extended with action/row stats below
 
             # Policy update
             if len(memory) >= policy_batch_size:
@@ -351,7 +383,31 @@ def main() -> None:
             delta_phi = actions_to_delta_phi(
                 actions, pair_i, pair_j, num_classes, beta, device,
             )
-            adaptive_loss.update_phi(delta_phi)
+
+            # Action distribution
+            n_plus = (actions == 2).sum().item()
+            n_zero = (actions == 1).sum().item()
+            n_minus = (actions == 0).sum().item()
+            total_actions = actions.numel()
+            # Phi row-mean stats
+            phi_row_tmp = adaptive_loss.phi.data.clone()
+            phi_row_tmp.fill_diagonal_(0)
+            row_means = phi_row_tmp.sum(dim=1) / (num_classes - 1)
+            row_mean_min = row_means.min().item()
+            row_mean_max = row_means.max().item()
+            row_mean_std = row_means.std().item()
+            if M_old is not None and prev_states is not None:
+                log_and_print(
+                    _reward_str
+                    + f" | Actions: +={n_plus}({n_plus/total_actions*100:.0f}%)"
+                    f" 0={n_zero}({n_zero/total_actions*100:.0f}%)"
+                    f" -={n_minus}({n_minus/total_actions*100:.0f}%)"
+                    f" | RowMean: [{row_mean_min:.4f}, {row_mean_max:.4f}]"
+                    f" std={row_mean_std:.4f}",
+                    log_file,
+                )
+
+            adaptive_loss.update_phi(delta_phi * 0.001)
 
             M_old = M_new
             prev_states = all_states

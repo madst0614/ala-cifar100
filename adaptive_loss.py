@@ -39,7 +39,7 @@ class AdaptiveLoss(nn.Module):
         y = F.one_hot(targets, self.num_classes).float()      # (B, C)
         weighted = y @ self.phi                               # (B, C)
         inner = (weighted * log_probs).sum(dim=1)             # (B,)
-        sig = torch.sigmoid(inner / self.num_classes)           # (B,)
+        sig = torch.sigmoid(inner)                             # (B,)
         return (-sig).mean()
 
     def update_phi(self, delta_phi: torch.Tensor) -> None:
@@ -63,7 +63,7 @@ class AdaptiveLoss(nn.Module):
         diag_mask = torch.eye(
             self.num_classes, device=self.phi.device, dtype=torch.bool,
         )
-        self.phi.data[~diag_mask] = self.phi.data[~diag_mask].clamp(-1, 1)
+        self.phi.data[~diag_mask] = self.phi.data[~diag_mask].clamp(-0.1, 0.1)
 
     def reset_phi(self) -> None:
         """Reset Φ to the identity matrix."""
