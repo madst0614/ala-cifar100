@@ -170,7 +170,7 @@ def main() -> None:
     num_classes = 100
     ce_criterion = nn.CrossEntropyLoss()
     adaptive_loss = AdaptiveLoss(num_classes).to(device)
-    warmup_epochs = 0
+    warmup_epochs = 50
 
     # RL controller
     state_dim = 24
