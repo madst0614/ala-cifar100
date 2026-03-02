@@ -403,11 +403,6 @@ def main() -> None:
                 )
 
             adaptive_loss.update_phi(delta_phi * 0.01)
-            # Global mean subtraction: off-diagonal 평균을 0으로
-            mask = ~torch.eye(num_classes, dtype=bool, device=device)
-            global_mean = adaptive_loss.phi.data[mask].mean()
-            adaptive_loss.phi.data[mask] -= global_mean
-            adaptive_loss.phi.data.fill_diagonal_(1.0)
 
             M_old = M_new
             prev_states = all_states
