@@ -355,7 +355,7 @@ def main() -> None:
             adaptive_loss.update_phi(delta_phi * 0.01)
             # Phi decay toward identity
             diag = torch.eye(num_classes, device=device)
-            adaptive_loss.phi.data = 0.95 * adaptive_loss.phi.data + 0.05 * diag
+            adaptive_loss.phi.data = 0.90 * adaptive_loss.phi.data + 0.10 * diag
             adaptive_loss.phi.data.fill_diagonal_(1.0)
 
             M_old = M_new
