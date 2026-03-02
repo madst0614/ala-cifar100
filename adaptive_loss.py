@@ -63,7 +63,7 @@ class AdaptiveLoss(nn.Module):
         diag_mask = torch.eye(
             self.num_classes, device=self.phi.device, dtype=torch.bool,
         )
-        self.phi.data[~diag_mask] = self.phi.data[~diag_mask].clamp(-1, 1)
+        self.phi.data[~diag_mask] = self.phi.data[~diag_mask].clamp(-0.1, 0.1)
 
     def reset_phi(self) -> None:
         """Reset Φ to the identity matrix."""
