@@ -170,7 +170,7 @@ def main() -> None:
     num_classes = 100
     ce_criterion = nn.CrossEntropyLoss()
     adaptive_loss = AdaptiveLoss(num_classes).to(device)
-    warmup_epochs = 50
+    warmup_epochs = 0
 
     # RL controller
     state_dim = 24
@@ -289,7 +289,7 @@ def main() -> None:
             if approx_epoch <= warmup_epochs:
                 loss = ce_criterion(logits, targets_batch)
             else:
-                loss = adaptive_loss(logits, targets_batch)
+                loss = adaptive_loss(logits, targets_batch) * 80.0
 
             loss.backward()
             optimizer.step()
