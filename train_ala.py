@@ -289,7 +289,7 @@ def main() -> None:
             if approx_epoch <= warmup_epochs:
                 loss = ce_criterion(logits, targets_batch)
             else:
-                loss = adaptive_loss(logits, targets_batch) * 80.0
+                loss = adaptive_loss(logits, targets_batch) * 5.0
 
             loss.backward()
             optimizer.step()
