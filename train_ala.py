@@ -221,6 +221,7 @@ def main() -> None:
     current_epoch = 0
     epoch_loss = 0.0
     epoch_total = 0
+    last_grad_norm = 0.0
     train_iter = iter(train_loader)
 
     pbar = tqdm(total=total_steps, desc="ALA Training", unit="step")
@@ -264,6 +265,27 @@ def main() -> None:
                         log_file,
                     )
 
+                # Debug: gradient norm, inner product, phi stats
+                model.eval()
+                with torch.no_grad():
+                    dbg_logits = model(val_images[:2048])
+                    dbg_log_probs = F.log_softmax(dbg_logits, dim=1)
+                    dbg_y = F.one_hot(val_targets[:2048], num_classes).float()
+                    dbg_weighted = dbg_y @ adaptive_loss.phi.data
+                    dbg_inner = (dbg_weighted * dbg_log_probs).sum(dim=1)
+                    dbg_sig_mean = torch.sigmoid(dbg_inner).mean()
+                dbg_mask = ~torch.eye(num_classes, dtype=torch.bool, device=device)
+                dbg_off = adaptive_loss.phi.data[dbg_mask]
+                log_and_print(
+                    f"  [Debug] GradNorm: {last_grad_norm:.4f} | "
+                    f"Inner: mean={dbg_inner.mean():.2f} std={dbg_inner.std():.2f} "
+                    f"min={dbg_inner.min():.2f} max={dbg_inner.max():.2f} | "
+                    f"Sig: {dbg_sig_mean:.4f} | "
+                    f"Phi: mean={dbg_off.mean():.4f} std={dbg_off.std():.4f} "
+                    f"[{dbg_off.min():.4f}, {dbg_off.max():.4f}]",
+                    log_file,
+                )
+
                 if current_epoch in (50, 100, 150, 200):
                     torch.save(
                         adaptive_loss.phi.data.cpu(),
@@ -289,9 +311,12 @@ def main() -> None:
             if approx_epoch <= warmup_epochs:
                 loss = ce_criterion(logits, targets_batch)
             else:
-                loss = adaptive_loss(logits, targets_batch) * 5.0
+                loss = adaptive_loss(logits, targets_batch)
 
             loss.backward()
+            last_grad_norm = (sum(
+                p.grad.norm() ** 2 for p in model.parameters() if p.grad is not None
+            ) ** 0.5).item()
             optimizer.step()
 
             epoch_loss += loss.item() * inputs.size(0)
