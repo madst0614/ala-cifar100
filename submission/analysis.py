@@ -7,7 +7,8 @@ Reads results from train_ala.py (results/train_ala_results.pt) and generates:
 (c) Policy entropy curve
 (d) Confusion-Phi correlation curve
 
-All plots -> results/curves/
+Phi heatmaps -> results/phi_heatmaps/
+Other plots -> results/curves/
 """
 
 import os
@@ -113,7 +114,7 @@ def plot_phi_heatmaps(results):
                     bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
             plt.colorbar(im, ax=ax, shrink=0.8, label="Phi off-diagonal value")
             plt.tight_layout()
-            path = f"results/curves/{name}_phi_epoch{ep}.png"
+            path = f"results/phi_heatmaps/{name}_phi_epoch{ep}.png"
             plt.savefig(path, dpi=150)
             plt.close()
             print(f"  Saved phi heatmap (single): {path}")
@@ -152,7 +153,7 @@ def plot_phi_heatmaps(results):
             if im is not None:
                 plt.colorbar(im, ax=axes, shrink=0.8, label="Phi off-diagonal value")
             plt.tight_layout()
-            path = f"results/curves/{name}_phi_evolution.png"
+            path = f"results/phi_heatmaps/{name}_phi_evolution.png"
             plt.savefig(path, dpi=150)
             plt.close()
             print(f"  Saved phi heatmap (4-subplot): {path}")
