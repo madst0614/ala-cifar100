@@ -350,6 +350,7 @@ def run_warmup(device, train_loader, val_images, val_targets, test_images, test_
 def run_experiment(
     name, config, ckpt_path, device,
     train_loader, val_images, val_targets, test_images, test_targets,
+    warmup_val_acc=0.0,
 ):
     """Run one experiment from warmup checkpoint for POST_WARMUP_EPOCHS more epochs."""
 
@@ -470,6 +471,19 @@ def run_experiment(
                     "val_acc": val_acc,
                     "test_acc": test_acc,
                 })
+
+                # Early stopping: if val_acc drops below warmup level by 15%+, abort
+                if val_acc < warmup_val_acc - 15.0:
+                    print(
+                        f"  EARLY STOP at epoch {current_epoch}: "
+                        f"val_acc {val_acc:.2f}% dropped >15% below warmup ({warmup_val_acc:.2f}%)"
+                    )
+                    pbar.close()
+                    return {
+                        "epoch_logs": epoch_logs,
+                        "window_logs": window_logs,
+                        "status": f"EARLY_STOP (epoch {current_epoch}, val={val_acc:.1f}%)",
+                    }
 
                 ep_rel = current_epoch - WARMUP_EPOCHS
                 if ep_rel % 10 == 0 or ep_rel == 1:
@@ -814,6 +828,12 @@ def main():
             device, train_loader, val_images, val_targets, test_images, test_targets,
         )
 
+    # Extract warmup val_acc for early stopping threshold
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+    warmup_val_acc = ckpt["val_acc"]
+    del ckpt
+    print(f"Warmup val_acc for early stopping: {warmup_val_acc:.2f}%")
+
     # Phase 1: Run experiments
     results = OrderedDict()
     total_exps = len(CONFIGS)
@@ -823,6 +843,7 @@ def main():
             result = run_experiment(
                 name, config, ckpt_path, device,
                 train_loader, val_images, val_targets, test_images, test_targets,
+                warmup_val_acc=warmup_val_acc,
             )
         except Exception as e:
             print(f"  FAILED with exception: {e}")
