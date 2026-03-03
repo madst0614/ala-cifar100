@@ -105,9 +105,9 @@ $\Phi = I$로 고정한 adaptive loss로 학습하면 **정상적으로 수렴**
 2. **중기 (epoch 100-150)**: Off-diagonal에 구조가 나타나기 시작.
    혼동이 잦은 클래스 쌍에서 값이 변화.
 
-3. **후기 (epoch 200)**: Spec faithful 버전에서는 entropy collapse로
+3. **후기 (epoch 200)**: paper_spec 버전에서는 entropy collapse로
    의미 있는 패턴 형성이 제한됨.
-   Stabilized 버전에서는 보다 안정적인 Phi 변화가 관찰됨.
+   stabilized 버전에서는 보다 안정적인 Phi 변화가 관찰됨.
 
 ### CIFAR-100 Superclass 구조와의 관계
 

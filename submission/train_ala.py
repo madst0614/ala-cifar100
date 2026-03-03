@@ -3,7 +3,7 @@
 3단계로 실행:
   Phase 0: CE warmup 50 epochs → checkpoint 저장
   Phase 1: baseline_ce — CE only 150 more epochs (200 total)
-  Phase 2: ALA spec_faithful — beta=0.1, sqrt normalization, clamp[-1,1], sign reward
+  Phase 2: ALA paper_spec — beta=0.1, sqrt normalization, clamp[-1,1], sign reward
   Phase 3: ALA stabilized — beta=0.1 * delta_scale=0.01, sqrt normalization, clamp[-1,1], sign reward
 
 핵심 파라미터 (과제 스펙):
@@ -51,7 +51,7 @@ CONFIGS = OrderedDict({
         "description": "CE only (no ALA), warmup 이후 150 epochs 추가 학습",
         "use_ala": False,
     },
-    "spec_faithful": {
+    "paper_spec": {
         "description": "ALA 논문 스펙 그대로: beta=0.1, sqrt norm, clamp[-1,1], sign reward",
         "use_ala": True,
         "clamp_range": (-1.0, 1.0),

@@ -51,14 +51,14 @@ CIFAR-100 ($C=100$)에서 inner product의 절대값이 크다.
 해결: $\sigma(z / \sqrt{C})$ 적용. $\sqrt{100} = 10$으로 나눠서
 sigmoid의 선형 영역을 활용, 의미 있는 gradient flow 유지.
 
-### 2. 실험 구성: Spec Faithful vs Stabilized
+### 2. 실험 구성: Paper Spec vs Stabilized
 
 | 설정 | beta | delta_scale | 실질 step | 설명 |
 |------|------|-------------|-----------|------|
-| spec_faithful | 0.1 | 1.0 | 0.1 | 논문 스펙 그대로 |
+| paper_spec | 0.1 | 1.0 | 0.1 | 논문 스펙 그대로 |
 | stabilized | 0.1 | 0.01 | 0.001 | Phi 변화를 100배 축소하여 안정화 |
 
-spec_faithful는 Phi가 급격히 변해 학습이 불안정해질 수 있다.
+paper_spec은 Phi가 급격히 변해 학습이 불안정해질 수 있다.
 stabilized는 Phi 변화를 작게 하여 모델 학습 안정성을 유지하면서
 RL controller가 의미 있는 조정을 할 여지를 준다.
 
@@ -73,7 +73,7 @@ ALA로 인해 학습이 발산하는 경우를 빠르게 감지하여 남은 실
 CE Warmup (50 epochs)
     ↓ checkpoint 저장
     ├→ baseline_ce: CE only 150 epochs (비교 기준)
-    ├→ spec_faithful: ALA (논문 스펙), 150 epochs
+    ├→ paper_spec: ALA (논문 스펙), 150 epochs
     └→ stabilized: ALA (안정화), 150 epochs
 ```
 

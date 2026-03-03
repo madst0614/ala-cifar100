@@ -1,7 +1,8 @@
 """Part 5: Visualization and analysis.
 
 Reads results from train_ala.py (results/train_ala_results.pt) and generates:
-(a) Phi heatmap: 4-subplot at epochs 50, 100, 150, 200
+(a) Phi heatmap: 4-subplot at epochs 50, 100, 150, 200 (full runs only)
+    For early-stopped experiments, a single heatmap of the available snapshot.
 (b) Train loss + Test accuracy curve (baseline vs ALA)
 (c) Policy entropy curve
 (d) Confusion-Phi correlation curve
@@ -10,7 +11,6 @@ All plots -> results/curves/
 """
 
 import os
-import glob
 
 import torch
 import numpy as np
@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 
 
 # ---------------------------------------------------------------------------
-# Load results
+# Load results (with backward compatibility for spec_faithful -> paper_spec)
 # ---------------------------------------------------------------------------
 
 def load_results():
@@ -30,80 +30,132 @@ def load_results():
     assert os.path.exists(path), (
         f"{path} not found -- run python train_ala.py first"
     )
-    return torch.load(path, map_location="cpu", weights_only=False)
+    results = torch.load(path, map_location="cpu", weights_only=False)
+
+    # Backward compat: old .pt files use "spec_faithful", new code uses "paper_spec"
+    if "spec_faithful" in results:
+        results["paper_spec"] = results.pop("spec_faithful")
+
+    return results
+
+
+def _resolve_phi_path(name, epoch):
+    """Try both paper_spec and spec_faithful filenames for phi snapshots."""
+    primary = f"results/phi_heatmaps/{name}_phi_epoch{epoch}.pt"
+    if os.path.exists(primary):
+        return primary
+    # Fallback: old filename
+    if name == "paper_spec":
+        fallback = f"results/phi_heatmaps/spec_faithful_phi_epoch{epoch}.pt"
+        if os.path.exists(fallback):
+            return fallback
+    return None
 
 
 # ---------------------------------------------------------------------------
-# (a) Phi Heatmap: 4-subplot (epoch 50, 100, 150, 200)
+# (a) Phi Heatmap
 # ---------------------------------------------------------------------------
 
 def plot_phi_heatmaps(results):
-    """Generate per-experiment Phi heatmap subplots with auto-scaled colorbar."""
+    """Generate Phi heatmap plots with auto-scaled colorbar.
+
+    - Full runs (all 4 snapshots available): 4-subplot layout.
+    - Early-stopped runs (only 1-2 snapshots): single heatmap per available epoch.
+    """
     snapshot_epochs = [50, 100, 150, 200]
 
     # ALA experiment names (exclude baseline)
     ala_names = [name for name in results if name not in ("baseline_ce", "warmup_log")]
 
     for name in ala_names:
-        # --- Pass 1: find global abs_max across all snapshots for this experiment ---
-        global_abs_max = 0.0
+        # --- Pass 1: load all available snapshots ---
         phi_data_cache = {}
         for epoch in snapshot_epochs:
-            phi_path = f"results/phi_heatmaps/{name}_phi_epoch{epoch}.pt"
-            if os.path.exists(phi_path):
+            phi_path = _resolve_phi_path(name, epoch)
+            if phi_path is not None:
                 phi = torch.load(phi_path, map_location="cpu", weights_only=True)
-                phi_np = phi.numpy()
-                mask = np.eye(phi_np.shape[0], dtype=bool)
-                off_diag = phi_np[~mask]
-                abs_max = np.abs(off_diag).max()
-                if abs_max > global_abs_max:
-                    global_abs_max = abs_max
-                phi_data_cache[epoch] = phi_np
+                phi_data_cache[epoch] = phi.numpy()
 
-        # Fallback to avoid vmin=vmax=0
+        if not phi_data_cache:
+            print(f"  Skipping {name}: no phi snapshots found")
+            continue
+
+        # Compute global abs_max across all available snapshots
+        mask = np.eye(100, dtype=bool)
+        global_abs_max = 0.0
+        for phi_np in phi_data_cache.values():
+            abs_max = np.abs(phi_np[~mask]).max()
+            if abs_max > global_abs_max:
+                global_abs_max = abs_max
         if global_abs_max < 1e-12:
             global_abs_max = 1e-6
 
-        # --- Pass 2: plot with consistent color scale ---
-        fig, axes = plt.subplots(1, 4, figsize=(24, 5))
-        fig.suptitle(f"{name}: Phi Evolution (epoch 50-200)", fontsize=14)
+        available_epochs = sorted(phi_data_cache.keys())
 
-        im = None
-        for idx, epoch in enumerate(snapshot_epochs):
-            ax = axes[idx]
+        # Decide layout: 4-subplot only if we have snapshots beyond epoch 50
+        if len(available_epochs) <= 1:
+            # --- Single heatmap for early-stopped experiment ---
+            ep = available_epochs[0]
+            phi_np = phi_data_cache[ep]
+            phi_display = phi_np.copy()
+            phi_display[mask] = 0.0
 
-            if epoch in phi_data_cache:
-                phi_np = phi_data_cache[epoch]
-                mask = np.eye(phi_np.shape[0], dtype=bool)
-                phi_display = phi_np.copy()
-                phi_display[mask] = 0.0
-
-                im = ax.imshow(phi_display, cmap="RdBu_r",
-                               vmin=-global_abs_max, vmax=global_abs_max, aspect="auto")
-                ax.set_title(f"Epoch {epoch}")
-
-                # Off-diagonal stats
-                off_diag = phi_np[~mask]
-                ax.text(0.02, 0.98,
-                        f"|mean|={np.abs(off_diag).mean():.4f}\nmax={np.abs(off_diag).max():.4f}",
-                        transform=ax.transAxes, fontsize=8, va="top",
-                        bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
-            else:
-                ax.text(0.5, 0.5, f"No data\n(epoch {epoch})",
-                        ha="center", va="center", transform=ax.transAxes)
-                ax.set_title(f"Epoch {epoch}")
-
+            fig, ax = plt.subplots(figsize=(8, 7))
+            im = ax.imshow(phi_display, cmap="RdBu_r",
+                           vmin=-global_abs_max, vmax=global_abs_max, aspect="auto")
+            ax.set_title(f"{name}: Phi at epoch {ep} (early stopped)")
             ax.set_xlabel("Class j")
-            if idx == 0:
-                ax.set_ylabel("Class i")
+            ax.set_ylabel("Class i")
+            off_diag = phi_np[~mask]
+            ax.text(0.02, 0.98,
+                    f"|mean|={np.abs(off_diag).mean():.4f}\nmax={np.abs(off_diag).max():.4f}",
+                    transform=ax.transAxes, fontsize=8, va="top",
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
+            plt.colorbar(im, ax=ax, shrink=0.8, label="Phi off-diagonal value")
+            plt.tight_layout()
+            path = f"results/curves/{name}_phi_epoch{ep}.png"
+            plt.savefig(path, dpi=150)
+            plt.close()
+            print(f"  Saved phi heatmap (single): {path}")
+        else:
+            # --- 4-subplot layout ---
+            fig, axes = plt.subplots(1, 4, figsize=(24, 5))
+            fig.suptitle(f"{name}: Phi Evolution (epoch 50-200)", fontsize=14)
 
-        if im is not None:
-            plt.colorbar(im, ax=axes, shrink=0.8, label="Phi off-diagonal value")
-        plt.tight_layout()
-        path = f"results/curves/{name}_phi_evolution.png"
-        plt.savefig(path, dpi=150)
-        plt.close()
-        print(f"  Saved phi heatmap: {path}")
+            im = None
+            for idx, epoch in enumerate(snapshot_epochs):
+                ax = axes[idx]
+
+                if epoch in phi_data_cache:
+                    phi_np = phi_data_cache[epoch]
+                    phi_display = phi_np.copy()
+                    phi_display[mask] = 0.0
+
+                    im = ax.imshow(phi_display, cmap="RdBu_r",
+                                   vmin=-global_abs_max, vmax=global_abs_max, aspect="auto")
+                    ax.set_title(f"Epoch {epoch}")
+
+                    off_diag = phi_np[~mask]
+                    ax.text(0.02, 0.98,
+                            f"|mean|={np.abs(off_diag).mean():.4f}\nmax={np.abs(off_diag).max():.4f}",
+                            transform=ax.transAxes, fontsize=8, va="top",
+                            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
+                else:
+                    ax.text(0.5, 0.5, f"No data\n(epoch {epoch})",
+                            ha="center", va="center", transform=ax.transAxes)
+                    ax.set_title(f"Epoch {epoch}")
+
+                ax.set_xlabel("Class j")
+                if idx == 0:
+                    ax.set_ylabel("Class i")
+
+            if im is not None:
+                plt.colorbar(im, ax=axes, shrink=0.8, label="Phi off-diagonal value")
+            plt.tight_layout()
+            path = f"results/curves/{name}_phi_evolution.png"
+            plt.savefig(path, dpi=150)
+            plt.close()
+            print(f"  Saved phi heatmap (4-subplot): {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +171,7 @@ def plot_comparison_curves(results):
     warmup_losses = [e["train_loss"] for e in warmup_log]
     warmup_test = [e["test_acc"] for e in warmup_log]
 
-    colors = {"baseline_ce": "gray", "spec_faithful": "tab:red", "stabilized": "tab:blue"}
+    colors = {"baseline_ce": "gray", "paper_spec": "tab:red", "stabilized": "tab:blue"}
 
     for name, data in results.items():
         if name == "warmup_log":
@@ -172,7 +224,7 @@ def plot_policy_entropy(results):
     """Policy entropy over training steps for ALA experiments."""
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    colors = {"spec_faithful": "tab:red", "stabilized": "tab:blue"}
+    colors = {"paper_spec": "tab:red", "stabilized": "tab:blue"}
 
     for name, data in results.items():
         if name in ("baseline_ce", "warmup_log"):
@@ -211,7 +263,7 @@ def plot_confusion_phi_correlation(results):
     """Off-diagonal Pearson correlation between confusion matrix and Phi."""
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    colors = {"spec_faithful": "tab:red", "stabilized": "tab:blue"}
+    colors = {"paper_spec": "tab:red", "stabilized": "tab:blue"}
 
     for name, data in results.items():
         if name in ("baseline_ce", "warmup_log"):
@@ -247,7 +299,7 @@ def plot_phi_movement(results):
     """Phi off-diagonal |mean| over time -- how much the RL controller adjusted Phi."""
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    colors = {"spec_faithful": "tab:red", "stabilized": "tab:blue"}
+    colors = {"paper_spec": "tab:red", "stabilized": "tab:blue"}
 
     for name, data in results.items():
         if name in ("baseline_ce", "warmup_log"):
