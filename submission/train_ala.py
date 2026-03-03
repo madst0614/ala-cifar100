@@ -161,15 +161,16 @@ def confusion_phi_correlation(confusion, phi, num_classes):
 # ---------------------------------------------------------------------------
 
 def save_phi_heatmap(phi_data, name, epoch):
-    """Phi 행렬의 off-diagonal heatmap을 저장."""
+    """Save Phi off-diagonal heatmap with data-driven color scale."""
     fig, ax = plt.subplots(figsize=(8, 7))
     phi_np = phi_data.cpu().numpy()
-    # 대각선을 0으로 마스킹하여 off-diagonal만 시각화
     mask = np.eye(phi_np.shape[0], dtype=bool)
     phi_display = phi_np.copy()
     phi_display[mask] = 0.0
 
-    im = ax.imshow(phi_display, cmap="RdBu_r", vmin=-1.0, vmax=1.0, aspect="auto")
+    # Auto-scale: use actual data range instead of fixed [-1, 1]
+    abs_max = max(np.abs(phi_np[~mask]).max(), 1e-6)
+    im = ax.imshow(phi_display, cmap="RdBu_r", vmin=-abs_max, vmax=abs_max, aspect="auto")
     ax.set_title(f"{name}: Phi at epoch {epoch}")
     ax.set_xlabel("Class j")
     ax.set_ylabel("Class i")

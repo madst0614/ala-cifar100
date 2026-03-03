@@ -1,12 +1,12 @@
-"""Part 5: 시각화 및 분석.
+"""Part 5: Visualization and analysis.
 
-train_ala.py의 결과 데이터(results/train_ala_results.pt)를 읽어서:
-(a) Phi heatmap: epoch 50,100,150,200 시점 4개 subplot
-(b) Train loss + Test accuracy curve (baseline vs ALA 비교)
+Reads results from train_ala.py (results/train_ala_results.pt) and generates:
+(a) Phi heatmap: 4-subplot at epochs 50, 100, 150, 200
+(b) Train loss + Test accuracy curve (baseline vs ALA)
 (c) Policy entropy curve
 (d) Confusion-Phi correlation curve
 
-모든 plot → results/curves/
+All plots -> results/curves/
 """
 
 import os
@@ -21,14 +21,14 @@ import matplotlib.pyplot as plt
 
 
 # ---------------------------------------------------------------------------
-# 결과 로딩
+# Load results
 # ---------------------------------------------------------------------------
 
 def load_results():
-    """train_ala.py에서 저장한 결과 데이터 로드."""
+    """Load result data saved by train_ala.py."""
     path = "results/train_ala_results.pt"
     assert os.path.exists(path), (
-        f"{path} 없음 — 먼저 python train_ala.py 실행 필요"
+        f"{path} not found -- run python train_ala.py first"
     )
     return torch.load(path, map_location="cpu", weights_only=False)
 
@@ -38,32 +38,51 @@ def load_results():
 # ---------------------------------------------------------------------------
 
 def plot_phi_heatmaps(results):
-    """ALA 실험들의 Phi heatmap을 epoch별 subplot으로 생성."""
+    """Generate per-experiment Phi heatmap subplots with auto-scaled colorbar."""
     snapshot_epochs = [50, 100, 150, 200]
 
-    # ALA 실험 이름 목록 (baseline 제외)
+    # ALA experiment names (exclude baseline)
     ala_names = [name for name in results if name not in ("baseline_ce", "warmup_log")]
 
     for name in ala_names:
-        fig, axes = plt.subplots(1, 4, figsize=(24, 5))
-        fig.suptitle(f"{name}: Phi 변화 (epoch 50 → 200)", fontsize=14)
-
-        for idx, epoch in enumerate(snapshot_epochs):
-            ax = axes[idx]
+        # --- Pass 1: find global abs_max across all snapshots for this experiment ---
+        global_abs_max = 0.0
+        phi_data_cache = {}
+        for epoch in snapshot_epochs:
             phi_path = f"results/phi_heatmaps/{name}_phi_epoch{epoch}.pt"
-
             if os.path.exists(phi_path):
                 phi = torch.load(phi_path, map_location="cpu", weights_only=True)
                 phi_np = phi.numpy()
-                # 대각선 마스킹 (off-diagonal만 시각화)
+                mask = np.eye(phi_np.shape[0], dtype=bool)
+                off_diag = phi_np[~mask]
+                abs_max = np.abs(off_diag).max()
+                if abs_max > global_abs_max:
+                    global_abs_max = abs_max
+                phi_data_cache[epoch] = phi_np
+
+        # Fallback to avoid vmin=vmax=0
+        if global_abs_max < 1e-12:
+            global_abs_max = 1e-6
+
+        # --- Pass 2: plot with consistent color scale ---
+        fig, axes = plt.subplots(1, 4, figsize=(24, 5))
+        fig.suptitle(f"{name}: Phi Evolution (epoch 50-200)", fontsize=14)
+
+        im = None
+        for idx, epoch in enumerate(snapshot_epochs):
+            ax = axes[idx]
+
+            if epoch in phi_data_cache:
+                phi_np = phi_data_cache[epoch]
                 mask = np.eye(phi_np.shape[0], dtype=bool)
                 phi_display = phi_np.copy()
                 phi_display[mask] = 0.0
 
-                im = ax.imshow(phi_display, cmap="RdBu_r", vmin=-1.0, vmax=1.0, aspect="auto")
+                im = ax.imshow(phi_display, cmap="RdBu_r",
+                               vmin=-global_abs_max, vmax=global_abs_max, aspect="auto")
                 ax.set_title(f"Epoch {epoch}")
 
-                # off-diagonal 통계
+                # Off-diagonal stats
                 off_diag = phi_np[~mask]
                 ax.text(0.02, 0.98,
                         f"|mean|={np.abs(off_diag).mean():.4f}\nmax={np.abs(off_diag).max():.4f}",
@@ -78,23 +97,23 @@ def plot_phi_heatmaps(results):
             if idx == 0:
                 ax.set_ylabel("Class i")
 
-        plt.colorbar(im, ax=axes, shrink=0.8, label="Phi off-diagonal value")
+        if im is not None:
+            plt.colorbar(im, ax=axes, shrink=0.8, label="Phi off-diagonal value")
         plt.tight_layout()
         path = f"results/curves/{name}_phi_evolution.png"
         plt.savefig(path, dpi=150)
         plt.close()
-        print(f"  Phi heatmap 저장: {path}")
+        print(f"  Saved phi heatmap: {path}")
 
 
 # ---------------------------------------------------------------------------
-# (b) Train Loss + Test Accuracy 비교
+# (b) Train Loss + Test Accuracy comparison
 # ---------------------------------------------------------------------------
 
 def plot_comparison_curves(results):
-    """Baseline CE vs ALA 실험들의 loss/accuracy 비교 플롯."""
+    """Loss/accuracy comparison: Baseline CE vs ALA experiments."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Warmup log가 있으면 앞에 추가
     warmup_log = results.get("warmup_log", [])
     warmup_epochs = [e["epoch"] for e in warmup_log]
     warmup_losses = [e["train_loss"] for e in warmup_log]
@@ -114,7 +133,7 @@ def plot_comparison_curves(results):
         losses = [e["train_loss"] for e in elogs]
         test_accs = [e["test_acc"] for e in elogs]
 
-        # Loss curve (warmup + 실험)
+        # Loss curve (warmup + experiment)
         ax = axes[0]
         if warmup_log:
             ax.plot(warmup_epochs, warmup_losses, color=color, alpha=0.3, linestyle="--")
@@ -142,7 +161,7 @@ def plot_comparison_curves(results):
     path = "results/curves/comparison_loss_acc.png"
     plt.savefig(path, dpi=150)
     plt.close()
-    print(f"  비교 플롯 저장: {path}")
+    print(f"  Saved comparison plot: {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +169,7 @@ def plot_comparison_curves(results):
 # ---------------------------------------------------------------------------
 
 def plot_policy_entropy(results):
-    """ALA 실험들의 정책 엔트로피 변화."""
+    """Policy entropy over training steps for ALA experiments."""
     fig, ax = plt.subplots(figsize=(8, 5))
 
     colors = {"spec_faithful": "tab:red", "stabilized": "tab:blue"}
@@ -167,13 +186,13 @@ def plot_policy_entropy(results):
         color = colors.get(name, None)
         ax.plot(steps, entropy, label=name, color=color, alpha=0.8)
 
-    # 이론적 최대 엔트로피 (3개 액션 균등 분포)
     max_entropy = np.log(3)
-    ax.axhline(y=max_entropy, color="gray", linestyle=":", alpha=0.5, label=f"max entropy (ln3={max_entropy:.3f})")
+    ax.axhline(y=max_entropy, color="gray", linestyle=":", alpha=0.5,
+               label=f"max entropy (ln3={max_entropy:.3f})")
 
     ax.set_xlabel("Step")
     ax.set_ylabel("Policy Entropy")
-    ax.set_title("Policy Entropy (탐색 정도 모니터링)")
+    ax.set_title("Policy Entropy (Exploration Monitoring)")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -181,7 +200,7 @@ def plot_policy_entropy(results):
     path = "results/curves/policy_entropy.png"
     plt.savefig(path, dpi=150)
     plt.close()
-    print(f"  엔트로피 플롯 저장: {path}")
+    print(f"  Saved entropy plot: {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +208,7 @@ def plot_policy_entropy(results):
 # ---------------------------------------------------------------------------
 
 def plot_confusion_phi_correlation(results):
-    """혼동행렬과 Phi의 off-diagonal Pearson 상관관계 변화."""
+    """Off-diagonal Pearson correlation between confusion matrix and Phi."""
     fig, ax = plt.subplots(figsize=(8, 5))
 
     colors = {"spec_faithful": "tab:red", "stabilized": "tab:blue"}
@@ -217,15 +236,15 @@ def plot_confusion_phi_correlation(results):
     path = "results/curves/confusion_phi_corr.png"
     plt.savefig(path, dpi=150)
     plt.close()
-    print(f"  상관관계 플롯 저장: {path}")
+    print(f"  Saved correlation plot: {path}")
 
 
 # ---------------------------------------------------------------------------
-# 추가: Phi abs_mean 변화 플롯
+# Extra: Phi abs_mean movement plot
 # ---------------------------------------------------------------------------
 
 def plot_phi_movement(results):
-    """Phi off-diagonal |mean| 변화 — RL controller가 Phi를 얼마나 조정했는지."""
+    """Phi off-diagonal |mean| over time -- how much the RL controller adjusted Phi."""
     fig, ax = plt.subplots(figsize=(8, 5))
 
     colors = {"spec_faithful": "tab:red", "stabilized": "tab:blue"}
@@ -244,7 +263,7 @@ def plot_phi_movement(results):
 
     ax.set_xlabel("Step")
     ax.set_ylabel("Phi Off-Diag |mean|")
-    ax.set_title("Phi 변화량 (|mean| of off-diagonal)")
+    ax.set_title("Phi Movement (|mean| off-diagonal)")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -252,7 +271,7 @@ def plot_phi_movement(results):
     path = "results/curves/phi_movement.png"
     plt.savefig(path, dpi=150)
     plt.close()
-    print(f"  Phi 변화량 플롯 저장: {path}")
+    print(f"  Saved phi movement plot: {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -263,17 +282,17 @@ def main():
     os.makedirs("results/curves", exist_ok=True)
     os.makedirs("results/phi_heatmaps", exist_ok=True)
 
-    print("결과 데이터 로딩...")
+    print("Loading result data...")
     results = load_results()
 
-    print("\n시각화 생성 중...")
+    print("\nGenerating visualizations...")
 
     # (a) Phi heatmap evolution
     print("\n(a) Phi heatmap:")
     plot_phi_heatmaps(results)
 
-    # (b) Loss/Accuracy 비교
-    print("\n(b) Loss/Accuracy 비교:")
+    # (b) Loss/Accuracy comparison
+    print("\n(b) Loss/Accuracy comparison:")
     plot_comparison_curves(results)
 
     # (c) Policy entropy
@@ -284,12 +303,12 @@ def main():
     print("\n(d) Confusion-Phi correlation:")
     plot_confusion_phi_correlation(results)
 
-    # 추가: Phi movement
+    # Extra: Phi movement
     print("\n(+) Phi movement:")
     plot_phi_movement(results)
 
-    print("\n모든 시각화 완료.")
-    print("결과 확인: results/curves/, results/phi_heatmaps/")
+    print("\nAll visualizations complete.")
+    print("Check: results/curves/, results/phi_heatmaps/")
 
 
 if __name__ == "__main__":
