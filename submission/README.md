@@ -9,7 +9,7 @@ ResNet-18 + CIFAR-100에서 RL controller 기반 적응형 손실 함수 학습.
 # 1. Baseline: ResNet-18 + CE loss, 200 epochs
 python baseline.py
 
-# 2. ALA 학습: warmup → baseline_ce → ALA(spec) → ALA(stabilized)
+# 2. ALA 학습: warmup → baseline_ce → ALA(paper_spec) → ALA(stabilized)
 python train_ala.py
 
 # 3. 시각화 생성
@@ -58,9 +58,10 @@ sigmoid의 선형 영역을 활용, 의미 있는 gradient flow 유지.
 | paper_spec | 0.1 | 1.0 | 0.1 | 논문 스펙 그대로 |
 | stabilized | 0.1 | 0.01 | 0.001 | Phi 변화를 100배 축소하여 안정화 |
 
-paper_spec은 Phi가 급격히 변해 학습이 불안정해질 수 있다.
-stabilized는 Phi 변화를 작게 하여 모델 학습 안정성을 유지하면서
-RL controller가 의미 있는 조정을 할 여지를 준다.
+논문의 beta=0.1은 CIFAR-10 (C=10, 45 pairs) 기준이다.
+CIFAR-100 (C=100, 4950 pairs)에서는 동일 beta로 업데이트 규모가 과도하여
+paper_spec은 epoch 54에서 early stop된다.
+delta_scale=0.01로 실질 step을 0.001로 축소하면 안정적으로 학습이 진행된다.
 
 ### 3. Early Stopping
 
@@ -78,6 +79,18 @@ CE Warmup (50 epochs)
 ```
 
 모든 실험이 동일한 warmup checkpoint에서 시작하므로 공정한 비교 가능.
+
+## 실험 결과
+
+| 실험 | Test Acc | Phi |mean| | Corr | 상태 |
+|------|----------|-----------|------|------|
+| baseline_ce | 58.36% | - | - | OK (200 ep) |
+| paper_spec | 27.41% | 0.168 | - | EARLY_STOP (ep 54) |
+| stabilized | **60.05%** | 0.014 | -0.56 | OK (200 ep) |
+
+- stabilized가 baseline 대비 **+1.69%p 개선**
+- paper_spec은 beta=0.1이 CIFAR-100에 과도하여 Phi 폭주 → early stop
+- Confusion-Phi correlation -0.56: 혼동이 높은 클래스 쌍일수록 Phi가 낮아짐
 
 ## 하이퍼파라미터
 

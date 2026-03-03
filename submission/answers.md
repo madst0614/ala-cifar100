@@ -97,28 +97,62 @@ $\Phi = I$로 고정한 adaptive loss로 학습하면 **정상적으로 수렴**
 
 ## Part 5(a): $\Phi$ 변화 패턴 분석
 
-### 실험에서 관찰된 패턴
+### 실험 결과 요약
 
-1. **초기 (epoch 50)**: $\Phi \approx I$, off-diagonal이 거의 0.
-   RL controller가 아직 학습되지 않은 상태.
+| 실험 | 최종 Test Acc | Phi |mean| | Phi max | Corr | 상태 |
+|------|-------------|-----------|---------|------|------|
+| baseline_ce | 58.36% | - | - | - | OK (200 ep) |
+| paper_spec | 27.41% | 0.168 | 0.979 | - | EARLY_STOP (ep 54) |
+| stabilized | 60.05% | 0.014 | 0.034 | -0.56 | OK (200 ep) |
 
-2. **중기 (epoch 100-150)**: Off-diagonal에 구조가 나타나기 시작.
-   혼동이 잦은 클래스 쌍에서 값이 변화.
+### paper_spec: $\beta = 0.1$이 CIFAR-100에는 과도
 
-3. **후기 (epoch 200)**: paper_spec 버전에서는 entropy collapse로
-   의미 있는 패턴 형성이 제한됨.
-   stabilized 버전에서는 보다 안정적인 Phi 변화가 관찰됨.
+논문은 CIFAR-10 ($C=10$, 45 pairs)에서 $\beta = 0.1$을 사용하지만,
+CIFAR-100 ($C=100$, 4950 pairs)에서 동일한 $\beta$를 적용하면
+매 K-step window마다 4950개 pair에 $\pm 0.1$씩 업데이트가 누적되어
+$\Phi$가 급격히 변한다. 실제로 phi_abs_mean이 0.168, phi_abs_max가
+0.979 (clamp 상한 1.0 근접)까지 폭주했고, val_acc가 27.41%로 급락하여
+**epoch 54에서 early stop**되었다.
+
+### stabilized: $\delta\_scale = 0.01$로 안정화
+
+실질 step을 $\beta \times \delta\_scale = 0.1 \times 0.01 = 0.001$로
+축소한 결과, $\Phi$가 적절한 범위에서 변화했다:
+
+1. **Epoch 50** (warmup 직후): $\Phi = I$, off-diagonal 전부 0.
+   RL controller 미적용 상태.
+
+2. **Epoch 100**: 구조 출현. $|\text{mean}| = 0.0142$, $\max = 0.0340$.
+   혼동이 높은 클래스 쌍에서 off-diagonal 값이 양/음 방향으로 분화.
+
+3. **Epoch 150-200**: Policy entropy가 0으로 수렴한 후 변화 정지.
+   최종 phi_abs_mean = 0.014, phi_abs_max = 0.034로 안정.
+
+4. **Confusion-Phi correlation**: $+0.05 \rightarrow -0.56$.
+   이는 **혼동이 높은 클래스 쌍일수록 $\Phi(i,j)$가 낮아진다**는 의미로,
+   RL controller가 "자주 혼동되는 클래스 쌍의 loss weight를 줄여서
+   모델이 해당 쌍의 구분에 덜 집중하게 하는" 전략을 학습한 것이다.
+
+5. **최종 성능**: baseline 58.36% → stabilized **60.05%** (+1.69%p 개선).
+
+### delta_scale 선택 근거
+
+논문의 $\beta = 0.1$은 CIFAR-10 ($C=10$) 기준이다:
+- $C=10$: $\binom{10}{2} = 45$ pairs, $\Phi \in \mathbb{R}^{10 \times 10}$
+- $C=100$: $\binom{100}{2} = 4950$ pairs, $\Phi \in \mathbb{R}^{100 \times 100}$
+
+동일한 $\beta$로 100배 많은 pair를 업데이트하면
+$\Phi$의 Frobenius norm 변화가 $\sim \sqrt{4950/45} \approx 10$배 커진다.
+$\delta\_scale = 0.01$을 곱해 실질 step을 0.001로 축소하면
+CIFAR-10에서의 업데이트 규모와 비슷한 수준이 된다.
 
 ### CIFAR-100 Superclass 구조와의 관계
 
 CIFAR-100은 20개 superclass (vehicles, animals 등) 안에
-각 5개 fine-grained class가 포함된다.
-이론적으로 같은 superclass 내의 클래스 쌍은 혼동이 높아
-$\Phi(i,j)$가 더 많이 조정되어야 한다.
-
-논문의 Figure S2와 유사하게, 유사 클래스 간에는 initially positive한
-correlation이 관찰되며, 학습이 진행됨에 따라 이들을 구분하기 위해
-negative 방향으로 전환되는 경향이 기대된다.
+각 5개 fine-grained class가 포함된다. Confusion-Phi correlation이
+-0.56으로 강한 음의 상관을 보인 것은, 같은 superclass 내의 유사
+클래스 쌍 (예: oak_tree vs maple_tree, bus vs pickup_truck)에서
+혼동이 높고 그에 대응하여 $\Phi(i,j)$가 낮아졌음을 시사한다.
 
 ---
 
